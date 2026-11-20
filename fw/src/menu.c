@@ -1,8 +1,10 @@
 /* Terminal menu on the config port (VT100/ANSI), plus a line-mode command
  * interface for scripting (':' in the menu).
  *
- * Keys: Up/Down select an entry, +/- change it directly,
- * PgUp/PgDn change in big steps, Enter opens a submenu or runs an action,
+ * Keys: Up/Down select an entry, Right/Enter opens a submenu, runs an action
+ * or starts editing a value (then Up/Down change it, Left/Right/Enter/Esc
+ * end editing), Left/Esc go back, +/- change a value without editing mode,
+ * PgUp/PgDn change in big steps,
  * Esc goes back, S saves, Ctrl-L redraws.
  *
  * Runs in PendSV (lowest priority). Input arrives from the USB ISR. */
@@ -362,6 +364,7 @@ static uint8_t depth;
 static const item_t *armed;          /* action waiting for a second Enter */
 static const char *msg;
 static bool dirty, clear_req;
+static bool editing;                 /* Up/Down change the selected value */
 
 static volatile bool open_req, close_req, refresh_req;
 static uint16_t sof_count;
@@ -413,22 +416,40 @@ static void draw(void)
     for (uint8_t i = 0; i < page->n; i++) {
         const item_t *it = &page->items[i];
         bool s = i == sel && selectable(it);
-        if (s) out_esc("\x1b[7m");
-        out_str(s ? " > " : "   ");
-        out_str(it->label);
-        out_pad(34);
-        item_value(it);
-        if (s) { out_pad(64); out_esc("\x1b[0m"); }
+        if (s && editing) {
+            /* edit mode: the value is highlighted, not the line */
+            out_str(" > ");
+            out_str(it->label);
+            out_pad(33);
+            out_esc("\x1b[7m");
+            out_ch(' ');
+            item_value(it);
+            out_str(" ");
+            out_esc("\x1b[0m");
+        } else {
+            if (s) out_esc("\x1b[7m");
+            out_str(s ? " > " : "   ");
+            out_str(it->label);
+            out_pad(34);
+            item_value(it);
+            if (s) { out_pad(64); out_esc("\x1b[0m"); }
+        }
         out_eol();
     }
     out_eol();
-    if (armed) out_str(" Press Enter again to confirm, any other key cancels.");
+    if (armed) out_str(" Press Right/Enter again to confirm, any other key cancels.");
     else if (msg) { out_str(" "); out_str(msg); }
     out_eol();
     out_esc("\x1b[2m");
-    out_str(" Up/Down select  +/- change  PgUp/PgDn big steps  Enter open/run");
-    out_eol();
-    out_str(" Esc back  S save  Ctrl-L redraw  : command line");
+    if (editing) {
+        out_str(" Up/Down or +/- change  PgUp/PgDn big steps  Left/Right/Enter/Esc done");
+        out_eol();
+        out_str(" S save");
+    } else {
+        out_str(" Up/Down select  Right/Enter open/edit/run  Left/Esc back");
+        out_eol();
+        out_str(" +/- quick change  PgUp/PgDn big steps  S save  Ctrl-L redraw  : command line");
+    }
     out_esc("\x1b[0m");
     out_eol();
     out_esc("\x1b[J");
@@ -608,6 +629,22 @@ static void menu_key(int k)
     msg = NULL;
     dirty = true;
 
+    if (editing) {
+        switch (k) {
+        case K_UP:   case '+': change(it, +1, false); return;
+        case K_DOWN: case '-': change(it, -1, false); return;
+        case K_PGUP: change(it, +1, true); return;
+        case K_PGDN: change(it, -1, true); return;
+        case K_LEFT: case K_RIGHT: case K_ESC: case '\r': case '\n':
+            editing = false;
+            return;
+        case 'S': case 's':
+            act_save();
+            return;
+        }
+        return;
+    }
+
     switch (k) {
     case K_UP:
     case K_DOWN:
@@ -620,7 +657,7 @@ static void menu_key(int k)
     case '-': if (it) change(it, -1, false); break;
     case K_PGUP: if (it) change(it, +1, true); break;
     case K_PGDN: if (it) change(it, -1, true); break;
-    case '\r': case '\n':
+    case K_RIGHT: case '\r': case '\n':
         if (!it) break;
         if (it->type == T_SUB && depth < ARRAY_LEN(stack)) {
             stack[depth] = page;
@@ -631,11 +668,11 @@ static void menu_key(int k)
         } else if (it->type == T_ACT) {
             if (it->confirm && was_armed != it) armed = it;
             else it->act();
-        } else if (it->type == T_BOOL) {
-            change(it, 1, false);
+        } else {
+            editing = true;                      /* number, on/off, choice */
         }
         break;
-    case K_ESC: case 0x7F: case 0x08: case 'q':
+    case K_LEFT: case K_ESC: case 0x7F: case 0x08: case 'q':
         if (depth) {
             page = stack[--depth];
             sel = sel_stack[depth];
@@ -738,6 +775,7 @@ void PendSV_Handler(void)
         first_selectable();
         armed = NULL;
         msg = NULL;
+        editing = false;
         esc_state = 0;
         clear_req = dirty = true;
     }

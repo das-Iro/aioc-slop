@@ -25,8 +25,9 @@ If nothing responds, short the BOOT0 pads (J2) while plugging in to reach the RO
 
     picocom /dev/serial/by-id/usb-aioc-slop_aioc-slop_<serial>-if00
 
-Up/Down select, +/- change, PgUp/PgDn big steps, Enter open/run,
-Esc back, S save, Ctrl-L redraw, `:` command line (`show`, `get`, `set`, `save`,
+Arrow keys only: Up/Down select, Right opens a page, runs an action or edits a
+value (then Up/Down change it, Left/Right ends editing), Left goes back.
+Also: Enter = Right, Esc = Left, +/- quick change, PgUp/PgDn big steps, S save, Ctrl-L redraw, `:` command line (`show`, `get`, `set`, `save`,
 `defaults`, `status`, `dfu`, `reset`).
 
 Pages: Audio (levels, mute, DC blocker, buffer/latency), PTT (source per output:
