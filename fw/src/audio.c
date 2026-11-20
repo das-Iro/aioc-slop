@@ -49,6 +49,8 @@ static int16_t in_fs[FS_N];
 static const uint32_t rates[] = { 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000 };
 
 #define LP_SECTIONS 2           /* 4th-order Butterworth */
+#define LP_RX_RATE  64000u      /* RX low-pass runs at up to this rate (k fs,
+                                   k <= 4), before the last decimation step */
 
 typedef struct {
     float b0, b1, b2, a1, a2;   /* normalized, a0 = 1 */
@@ -78,6 +80,9 @@ typedef struct {
     uint16_t peak;
     int32_t  gain;              /* Q15, 0 = muted */
     biquad_t lp[LP_SECTIONS];   /* low-pass: cascaded biquads */
+    float    lp_sum;            /* RX: sum over the last decimation step */
+    uint32_t lp_n;
+    uint32_t lp_os;             /* RX: low-pass rate / fs (1, 2 or 4) */
     bool     lp_on;
     int32_t  dc;                /* DC estimate, Q12 (IN only) */
     bool     dc_init;           /* seed the DC estimate with the next sample */
@@ -151,13 +156,20 @@ static void lp_design(stream_t *s, uint8_t sel)
     static const float q[LP_SECTIONS] = { 0.54119610f, 1.30656296f };
     float fc = sel < LP_COUNT ? lp_hz[sel] : 0.0f;
     bool on = fc > 0.0f && fc < 0.45f * (float)s->fs;
+    /* RX: run at k fs (anti-aliasing). At 44.1/48 kHz k = 1: the input RC
+     * (R5/C11, ~7 kHz) already keeps content away from fs/2 there. */
+    uint32_t os = 1;
+    if (s == &in_s)
+        while (os < 4 && s->fs * os * 2 <= LP_RX_RATE)
+            os *= 2;
     biquad_t bq[LP_SECTIONS];
     for (int k = 0; k < LP_SECTIONS; k++) {
         biquad_t *f = &bq[k];
         *f = (biquad_t){ .b0 = 1.0f };
         if (!on)
             continue;
-        float w0 = 2.0f * 3.14159265f * fc / (float)s->fs;
+        float rate = (float)s->fs * os;
+        float w0 = 2.0f * 3.14159265f * fc / rate;
         float cw = cosf(w0), alpha = sinf(w0) / (2.0f * q[k]);
         float a0 = 1.0f + alpha;
         f->b0 = (1.0f - cw) * 0.5f / a0;
@@ -170,6 +182,9 @@ static void lp_design(stream_t *s, uint8_t sel)
     __disable_irq();
     for (int k = 0; k < LP_SECTIONS; k++)
         s->lp[k] = bq[k];
+    s->lp_os = os;
+    s->lp_sum = 0.0f;
+    s->lp_n = 0;
     s->lp_on = on;
     __set_PRIMASK(pm);
 }
@@ -234,9 +249,20 @@ static void dsp_adc(void)
         avail = 0;
     }
     const float R = s->ratio;
-    const float scale = 16.0f / R;           /* average, 12 bit -> 16 bit */
     const bool avg = cfg.oversample;
     float need = s->need, acc = s->acc;
+    /* With the RX low-pass on, the moving average produces 4 fs; the
+     * low-pass runs there and an average of 4 makes fs. Content above the
+     * cutoff is attenuated before it can fold into the audio band. */
+    const bool lpf = s->lp_on;
+    const uint32_t os = lpf ? s->lp_os : 1u;
+    const float Ri = R / (float)os;
+    const float scale_i = 16.0f / Ri, inv_os = 1.0f / (float)os;
+    float lp_sum = s->lp_sum;
+    uint32_t lp_n = s->lp_n;
+    biquad_t bq[LP_SECTIONS];                /* local copy: keeps it in registers */
+    for (int k = 0; k < LP_SECTIONS; k++)
+        bq[k] = s->lp[k];
     while (avail) {
         if (need >= 1.0f) {
             /* whole samples of the current output, up to the ring end */
@@ -258,15 +284,42 @@ static void dsp_adc(void)
             float x = (float)adc_hw[d];
             d = (d + 1) & ADC_M;
             avail--;
-            float y = avg ? (acc + x * need) * scale : x * 16.0f;
-            int32_t v = (int32_t)lrintf(y - 32768.0f);
-            in_fs[w++ & FS_M] = (int16_t)MAX(-32768, MIN(32767, v));
+            float y = (avg ? (acc + x * need) * scale_i : x * 16.0f) - 32768.0f;
             acc = x * (1.0f - need);
-            need += R - 1.0f;
+            need += Ri - 1.0f;
+            if (lpf) {
+                for (int k = 0; k < LP_SECTIONS; k++) {
+                    biquad_t *f = &bq[k];
+                    float o = f->b0 * y + f->z1;
+                    f->z1 = f->b1 * y - f->a1 * o + f->z2;
+                    f->z2 = f->b2 * y - f->a2 * o;
+                    y = o;
+                }
+                lp_sum += y;
+                if (++lp_n < os)
+                    continue;
+                y = lp_sum * inv_os;
+                lp_sum = 0.0f;
+                lp_n = 0;
+            }
+            int32_t v = (int32_t)lrintf(y);
+            in_fs[w++ & FS_M] = (int16_t)MAX(-32768, MIN(32767, v));
         }
     }
     s->need = need;
     s->acc = acc;
+    s->lp_sum = lp_sum;
+    s->lp_n = lp_n;
+    if (lpf) {
+        uint32_t pm = __get_PRIMASK();
+        __disable_irq();
+        if (s->lp_on)                         /* not redesigned meanwhile */
+            for (int k = 0; k < LP_SECTIONS; k++) {
+                s->lp[k].z1 = bq[k].z1;
+                s->lp[k].z2 = bq[k].z2;
+            }
+        __set_PRIMASK(pm);
+    }
     __disable_irq();
     s->w = w;
     s->done = d;
@@ -569,7 +622,6 @@ static void in_prepare(void)
     uint32_t peak = 0;
     uint32_t r = s->r;
     bool dcb = cfg.dc_block;
-    const bool lpf = s->lp_on;
     for (uint32_t i = 0; i < n; i++) {
         int32_t x = in_fs[r++ & FS_M];
         if (s->dc_init) {
@@ -580,8 +632,6 @@ static void in_prepare(void)
             s->dc += ((x << 12) - s->dc) >> 12;      /* ~1.9 Hz at 48 kHz */
             x -= s->dc >> 12;
         }
-        if (lpf)
-            x = (int32_t)lrintf(lp_run(s, (float)x));
         int32_t v = (x * g) >> 15;
         if (v > 32767) v = 32767;
         if (v < -32768) v = -32768;
