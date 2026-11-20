@@ -32,11 +32,11 @@ Also: Enter = Right, Esc = Left, +/- quick change, PgUp/PgDn big steps, S save, 
 
 Pages: Audio (levels, mute, DC blocker, buffer/latency), PTT (source per output:
 DTR / RTS / DTR&!RTS / RTS&!DTR, VOX, time-out, manual), VOX (threshold, hang),
-Serial, System (LED, sleep on/off, DFU, reset), Live status.
+Serial, System (LED, DFU, reset), Live status.
 
 Default PTT1 = DTR and not RTS, so CHIRP (DTR+RTS) doesn't key the radio.
-`sleep off` replaces WFI with a busy idle loop to test supply-ripple noise.
 The decimator idea comes from rhgndf's AIOC fork (audio_dsp.c). RX noise
 floor with nothing connected: -84 dBFS at 48 kHz and -87 dBFS at 8 kHz with
-oversampling on and sleep off (-71/-72 dBFS with point sampling). With sleep
-on, CPU current steps add 1 kHz lines and cost 5..8 dB.
+oversampling on (-71/-72 dBFS with point sampling). The core never sleeps
+(no WFI): sleeping made the supply current step with the interrupt work,
+which added 1 kHz lines and cost 5..8 dB.

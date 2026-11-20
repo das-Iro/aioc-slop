@@ -35,10 +35,9 @@ int main(void)
     audio_init();
     usb_init();
 
-    /* Everything runs in interrupts. With sleep off the core spins here
-     * instead of sleeping, so the supply current has no 1 kHz steps. */
-    for (;;) {
-        if (cfg.sleep_en)
-            __WFI();
-    }
+    /* Everything runs in interrupts. The core never sleeps: WFI made the
+     * supply current step with every burst of interrupt work, which showed
+     * up as 1 kHz lines and 5..8 dB more noise on the RX audio. */
+    for (;;)
+        __NOP();
 }

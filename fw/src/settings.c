@@ -18,7 +18,7 @@ void settings_defaults(void)
         .ptt_vox = { 0, 0 },
         .tot_s = 0,
         .vox_thr = -30, .vox_hang = 500,
-        .led_en = 1, .sleep_en = 1,
+        .led_en = 1,
         .oversample = 1,
     };
 }

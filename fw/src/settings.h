@@ -20,7 +20,7 @@ typedef struct {
     int16_t  vox_thr;      /* dBFS */
     uint16_t vox_hang;     /* ms */
     uint8_t  led_en;
-    uint8_t  sleep_en;     /* WFI in idle; off = busy idle (noise test) */
+    uint8_t  unused0;      /* was the sleep option (keeps the layout) */
     uint8_t  oversample;   /* ADC/DAC at fs * OSR with FIR filters */
     uint8_t  pad[3];
     uint32_t crc;

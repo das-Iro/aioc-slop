@@ -261,7 +261,6 @@ static void info_dsp(void)
 static void info_usb(void)
 {
     out_str(usb_suspended ? "suspended" : usb_configured ? "configured" : "not configured");
-    out_str(cfg.sleep_en ? ", idle: sleep" : ", idle: busy loop");
 }
 
 static int32_t get_man1(void) { return ptt_manual_get(0); }
@@ -320,7 +319,6 @@ static const item_t serial_items[] = {
 
 static const item_t system_items[] = {
     BOOL("Status LED", "led", &cfg.led_en, ptt_update),
-    BOOL("Sleep when idle (WFI)", "sleep", &cfg.sleep_en, NULL),
     INFO("Firmware", info_version),
     INFO("Serial number", info_serial),
     INFO("Chip", info_chip),
