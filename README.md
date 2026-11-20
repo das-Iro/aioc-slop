@@ -23,7 +23,7 @@ If nothing responds, short the BOOT0 pads (J2) while plugging in to reach the RO
 
 ## Menu
 
-    picocom /dev/serial/by-id/usb-aioc-slop_aioc-slop_<serial>-if00
+    picocom /dev/serial/by-id/usb-aioc-slop_config-if00_radio-if02_aiocslop_<serial>-if00
 
 Left/Right select, Up/Down (or +/-) change, PgUp/PgDn big steps, Enter open/run,
 Esc back, S save, Ctrl-L redraw, `:` command line (`show`, `get`, `set`, `save`,
