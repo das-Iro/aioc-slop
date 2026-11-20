@@ -78,7 +78,7 @@ typedef struct {
     uint32_t xruns;
     uint16_t idle;
     uint16_t peak;
-    int32_t  gain;              /* Q15, 0 = muted */
+    int32_t  gain;              /* Q12 (4096 = 0 dB, up to +12 dB), 0 = muted */
     biquad_t lp[LP_SECTIONS];   /* low-pass: cascaded biquads */
     float    lp_sum;            /* RX: sum over the last decimation step */
     uint32_t lp_n;
@@ -140,9 +140,9 @@ static void loop_reset(stream_t *s)
     s->sync = true;
 }
 
-static int32_t db_to_q15(int16_t v256)
+static int32_t db_to_q12(int16_t v256)
 {
-    return (int32_t)(32768.0f * expf((float)v256 * (0.11512925f / 256.0f)));  /* ln10/20 */
+    return (int32_t)(4096.0f * expf((float)v256 * (0.11512925f / 256.0f)));  /* ln10/20 */
 }
 
 /* ---- low-pass ------------------------------------------------------------ */
@@ -211,8 +211,8 @@ static inline float lp_run(stream_t *s, float x)
 
 void audio_gain_update(void)
 {
-    out_s.gain = cfg.mute_out ? 0 : db_to_q15(cfg.vol_out);
-    in_s.gain  = cfg.mute_in  ? 0 : db_to_q15(cfg.vol_in);
+    out_s.gain = cfg.mute_out ? 0 : db_to_q12(cfg.vol_out);
+    in_s.gain  = cfg.mute_in  ? 0 : db_to_q12(cfg.vol_in);
 }
 
 /* ---- DSP (DSP_IRQ, below the USB ISR) ------------------------------------ */
@@ -571,7 +571,7 @@ void audio_out_packet(void)
     const bool lpf = s->lp_on;
     uint32_t peak = 0;
     for (uint16_t i = 0; i < bytes / 2; i++) {
-        int32_t v = ((int32_t)(int16_t)p[2 * i] * g) >> 15;
+        int32_t v = ((int32_t)(int16_t)p[2 * i] * g) >> 12;
         if (lpf)
             v = (int32_t)lrintf(lp_run(s, (float)v));
         if (v > 32767) v = 32767;
@@ -632,7 +632,7 @@ static void in_prepare(void)
             s->dc += ((x << 12) - s->dc) >> 12;      /* ~1.9 Hz at 48 kHz */
             x -= s->dc >> 12;
         }
-        int32_t v = (x * g) >> 15;
+        int32_t v = (x * g) >> 12;
         if (v > 32767) v = 32767;
         if (v < -32768) v = -32768;
         uint32_t a = (uint32_t)(v < 0 ? -v : v);
