@@ -97,7 +97,7 @@ int usb_string_desc(uint8_t idx, uint8_t *buf, uint16_t max)
         buf[0] = 4; buf[1] = 3; buf[2] = 0x09; buf[3] = 0x04;
         return 4;
     case STR_MANUF:   s = "aioc-slop"; break;
-    case STR_PRODUCT: s = "config-if00 radio-if02 aiocslop"; break;
+    case STR_PRODUCT: s = "aioc-slop"; break;
     case STR_SERIAL:  s = usb_serial(); break;
     case STR_CFG:     s = "aioc-slop config"; break;
     case STR_RADIO:   s = "aioc-slop radio"; break;
