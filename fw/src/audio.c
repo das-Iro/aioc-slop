@@ -48,6 +48,13 @@ static int16_t out_fs[FS_N];
 static int16_t in_fs[FS_N];
 static const uint32_t rates[] = { 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000 };
 
+#define LP_SECTIONS 2           /* 4th-order Butterworth */
+
+typedef struct {
+    float b0, b1, b2, a1, a2;   /* normalized, a0 = 1 */
+    float z1, z2;               /* transposed direct form II state */
+} biquad_t;
+
 typedef struct {
     DMA_Channel_TypeDef *dma;
     volatile uint32_t fs;
@@ -70,8 +77,7 @@ typedef struct {
     uint16_t idle;
     uint16_t peak;
     int32_t  gain;              /* Q15, 0 = muted */
-    float    lp_b0, lp_b1, lp_b2, lp_a1, lp_a2;   /* low-pass biquad */
-    float    lp_z1, lp_z2;      /* its state (transposed direct form II) */
+    biquad_t lp[LP_SECTIONS];   /* low-pass: cascaded biquads */
     bool     lp_on;
     int32_t  dc;                /* DC estimate, Q12 (IN only) */
     bool     dc_init;           /* seed the DC estimate with the next sample */
@@ -137,27 +143,33 @@ static int32_t db_to_q15(int16_t v256)
 /* ---- low-pass ------------------------------------------------------------ */
 static const float lp_hz[LP_COUNT] = { 0, 3000, 4000, 8000, 16000 };
 
-/* 2nd-order Butterworth low-pass (bilinear transform, RBJ cookbook).
+/* 4th-order Butterworth low-pass: two biquads (bilinear transform, RBJ
+ * cookbook) with the Butterworth pole Qs. 24 dB/octave, flat passband.
  * Off when the cutoff is not clearly below Nyquist. */
 static void lp_design(stream_t *s, uint8_t sel)
 {
+    static const float q[LP_SECTIONS] = { 0.54119610f, 1.30656296f };
     float fc = sel < LP_COUNT ? lp_hz[sel] : 0.0f;
     bool on = fc > 0.0f && fc < 0.45f * (float)s->fs;
-    float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-    if (on) {
+    biquad_t bq[LP_SECTIONS];
+    for (int k = 0; k < LP_SECTIONS; k++) {
+        biquad_t *f = &bq[k];
+        *f = (biquad_t){ .b0 = 1.0f };
+        if (!on)
+            continue;
         float w0 = 2.0f * 3.14159265f * fc / (float)s->fs;
-        float cw = cosf(w0), alpha = sinf(w0) * 0.70710678f;   /* Q = 1/sqrt(2) */
+        float cw = cosf(w0), alpha = sinf(w0) / (2.0f * q[k]);
         float a0 = 1.0f + alpha;
-        b0 = (1.0f - cw) * 0.5f / a0;
-        b1 = (1.0f - cw) / a0;
-        b2 = b0;
-        a1 = -2.0f * cw / a0;
-        a2 = (1.0f - alpha) / a0;
+        f->b0 = (1.0f - cw) * 0.5f / a0;
+        f->b1 = (1.0f - cw) / a0;
+        f->b2 = f->b0;
+        f->a1 = -2.0f * cw / a0;
+        f->a2 = (1.0f - alpha) / a0;
     }
     uint32_t pm = __get_PRIMASK();
     __disable_irq();
-    s->lp_b0 = b0; s->lp_b1 = b1; s->lp_b2 = b2; s->lp_a1 = a1; s->lp_a2 = a2;
-    s->lp_z1 = s->lp_z2 = 0.0f;
+    for (int k = 0; k < LP_SECTIONS; k++)
+        s->lp[k] = bq[k];
     s->lp_on = on;
     __set_PRIMASK(pm);
 }
@@ -172,10 +184,14 @@ bool audio_filter_active(bool in) { return in ? in_s.lp_on : out_s.lp_on; }
 
 static inline float lp_run(stream_t *s, float x)
 {
-    float y = s->lp_b0 * x + s->lp_z1;
-    s->lp_z1 = s->lp_b1 * x - s->lp_a1 * y + s->lp_z2;
-    s->lp_z2 = s->lp_b2 * x - s->lp_a2 * y;
-    return y;
+    for (int k = 0; k < LP_SECTIONS; k++) {
+        biquad_t *f = &s->lp[k];
+        float y = f->b0 * x + f->z1;
+        f->z1 = f->b1 * x - f->a1 * y + f->z2;
+        f->z2 = f->b2 * x - f->a2 * y;
+        x = y;
+    }
+    return x;
 }
 
 void audio_gain_update(void)

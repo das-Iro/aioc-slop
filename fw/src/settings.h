@@ -1,7 +1,7 @@
 #pragma once
 #include "board.h"
 
-/* low-pass choices (cutoff), 2nd-order Butterworth */
+/* low-pass choices (cutoff), 4th-order Butterworth */
 enum { LP_OFF, LP_3K, LP_4K, LP_8K, LP_16K, LP_COUNT };
 
 enum { PTT_SRC_OFF, PTT_SRC_DTR, PTT_SRC_RTS, PTT_SRC_DTR_NRTS, PTT_SRC_RTS_NDTR,
