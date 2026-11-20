@@ -268,6 +268,14 @@ static int32_t get_man2(void) { return ptt_manual_get(1); }
 static void set_man1(int32_t v) { ptt_manual(0, v); }
 static void set_man2(int32_t v) { ptt_manual(1, v); }
 
+static const char *const lp_names[LP_COUNT] = { "off", "3 kHz", "4 kHz", "8 kHz", "16 kHz" };
+
+static void info_lp(void)
+{
+    out_str("TX "); out_str(audio_filter_active(false) ? "active" : cfg.lp_tx ? "bypassed (above fs/2)" : "off");
+    out_str(", RX "); out_str(audio_filter_active(true) ? "active" : cfg.lp_rx ? "bypassed (above fs/2)" : "off");
+}
+
 static const char *const ptt_names[PTT_SRC_COUNT] = { "off", "DTR", "RTS", "DTR and not RTS", "RTS and not DTR" };
 
 #define VOL(lbl, k, p) { .label = lbl, .key = k, .type = T_NUM, .vt = V_I16, .ptr = p, \
@@ -283,6 +291,11 @@ static const item_t audio_items[] = {
     BOOL("RX mute", "rx_mute", &cfg.mute_in, audio_gain_update),
     BOOL("RX DC blocker", "dc_block", &cfg.dc_block, NULL),
     BOOL("Oversampling", "oversample", &cfg.oversample, audio_reconfigure),
+    { .label = "TX low-pass (USB -> radio)", .key = "lp_tx", .type = T_CHOICE, .vt = V_U8,
+      .ptr = &cfg.lp_tx, .max = LP_COUNT, .names = lp_names, .apply = audio_filter_update },
+    { .label = "RX low-pass (radio -> USB)", .key = "lp_rx", .type = T_CHOICE, .vt = V_U8,
+      .ptr = &cfg.lp_rx, .max = LP_COUNT, .names = lp_names, .apply = audio_filter_update },
+    INFO("Low-pass state", info_lp),
     { .label = "Buffer (latency)", .key = "buffer", .type = T_NUM, .vt = V_U8, .ptr = &cfg.buf_ms,
       .min = 1, .max = 8, .step = 1, .big = 2, .div = 1, .unit = "ms", .apply = audio_resync },
     INFO("Sample rates (Hz) x OSR", info_rates),
@@ -397,6 +410,7 @@ static void act_defaults(void)
 {
     settings_defaults();
     audio_gain_update();
+    audio_filter_update();
     vox_thr_update();
     ptt_update();
     audio_resync();

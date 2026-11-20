@@ -30,7 +30,8 @@ value (then Up/Down change it, Left/Right ends editing), Left goes back.
 Also: Enter = Right, Esc = Left, +/- quick change, PgUp/PgDn big steps, S save, Ctrl-L redraw, `:` command line (`show`, `get`, `set`, `save`,
 `defaults`, `status`, `dfu`, `reset`).
 
-Pages: Audio (levels, mute, DC blocker, buffer/latency), PTT (source per output:
+Pages: Audio (levels, mute, DC blocker, buffer/latency (default 1 ms),
+oversampling, low-pass 3/4/8/16 kHz for TX and RX), PTT (source per output:
 DTR / RTS / DTR&!RTS / RTS&!DTR, VOX, time-out, manual), VOX (threshold, hang),
 Serial, System (LED, DFU, reset), Live status.
 

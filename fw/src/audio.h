@@ -40,3 +40,5 @@ void  audio_stat(bool in, audio_stat_t *st);   /* clears peak */
 float audio_frame_ppm(void);            /* host clock vs. crystal */
 float audio_dsp_load(void);             /* filter CPU load, percent */
 void  audio_reconfigure(void);          /* after cfg.oversample changed */
+void  audio_filter_update(void);        /* after cfg.lp_tx / lp_rx changed */
+bool  audio_filter_active(bool in);     /* cutoff below ~0.45 fs */

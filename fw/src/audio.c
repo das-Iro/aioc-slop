@@ -70,6 +70,9 @@ typedef struct {
     uint16_t idle;
     uint16_t peak;
     int32_t  gain;              /* Q15, 0 = muted */
+    float    lp_b0, lp_b1, lp_b2, lp_a1, lp_a2;   /* low-pass biquad */
+    float    lp_z1, lp_z2;      /* its state (transposed direct form II) */
+    bool     lp_on;
     int32_t  dc;                /* DC estimate, Q12 (IN only) */
     bool     dc_init;           /* seed the DC estimate with the next sample */
     uint32_t pkt_acc;           /* fractional samples per frame (IN) */
@@ -129,6 +132,50 @@ static void loop_reset(stream_t *s)
 static int32_t db_to_q15(int16_t v256)
 {
     return (int32_t)(32768.0f * expf((float)v256 * (0.11512925f / 256.0f)));  /* ln10/20 */
+}
+
+/* ---- low-pass ------------------------------------------------------------ */
+static const float lp_hz[LP_COUNT] = { 0, 3000, 4000, 8000, 16000 };
+
+/* 2nd-order Butterworth low-pass (bilinear transform, RBJ cookbook).
+ * Off when the cutoff is not clearly below Nyquist. */
+static void lp_design(stream_t *s, uint8_t sel)
+{
+    float fc = sel < LP_COUNT ? lp_hz[sel] : 0.0f;
+    bool on = fc > 0.0f && fc < 0.45f * (float)s->fs;
+    float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    if (on) {
+        float w0 = 2.0f * 3.14159265f * fc / (float)s->fs;
+        float cw = cosf(w0), alpha = sinf(w0) * 0.70710678f;   /* Q = 1/sqrt(2) */
+        float a0 = 1.0f + alpha;
+        b0 = (1.0f - cw) * 0.5f / a0;
+        b1 = (1.0f - cw) / a0;
+        b2 = b0;
+        a1 = -2.0f * cw / a0;
+        a2 = (1.0f - alpha) / a0;
+    }
+    uint32_t pm = __get_PRIMASK();
+    __disable_irq();
+    s->lp_b0 = b0; s->lp_b1 = b1; s->lp_b2 = b2; s->lp_a1 = a1; s->lp_a2 = a2;
+    s->lp_z1 = s->lp_z2 = 0.0f;
+    s->lp_on = on;
+    __set_PRIMASK(pm);
+}
+
+void audio_filter_update(void)
+{
+    lp_design(&out_s, cfg.lp_tx);
+    lp_design(&in_s, cfg.lp_rx);
+}
+
+bool audio_filter_active(bool in) { return in ? in_s.lp_on : out_s.lp_on; }
+
+static inline float lp_run(stream_t *s, float x)
+{
+    float y = s->lp_b0 * x + s->lp_z1;
+    s->lp_z1 = s->lp_b1 * x - s->lp_a1 * y + s->lp_z2;
+    s->lp_z2 = s->lp_b2 * x - s->lp_a2 * y;
+    return y;
 }
 
 void audio_gain_update(void)
@@ -356,6 +403,7 @@ void audio_init(void)
     ADC2->CR |= ADC_CR_ADSTART;
 
     audio_gain_update();
+    audio_filter_update();
     out_s.reconf = in_s.reconf = true;
     set_ratio(&out_s);
     set_ratio(&in_s);
@@ -451,10 +499,14 @@ void audio_out_packet(void)
     }
     volatile uint16_t *p = usb_ep_pma(EP_AUDIO_OUT);
     int32_t g = s->gain;
+    const bool lpf = s->lp_on;
     uint32_t peak = 0;
     for (uint16_t i = 0; i < bytes / 2; i++) {
         int32_t v = ((int32_t)(int16_t)p[2 * i] * g) >> 15;
+        if (lpf)
+            v = (int32_t)lrintf(lp_run(s, (float)v));
         if (v > 32767) v = 32767;
+        if (v < -32768) v = -32768;
         uint32_t a = (uint32_t)(v < 0 ? -v : v);
         if (a > peak) peak = a;
         out_fs[w++ & FS_M] = (int16_t)v;
@@ -501,6 +553,7 @@ static void in_prepare(void)
     uint32_t peak = 0;
     uint32_t r = s->r;
     bool dcb = cfg.dc_block;
+    const bool lpf = s->lp_on;
     for (uint32_t i = 0; i < n; i++) {
         int32_t x = in_fs[r++ & FS_M];
         if (s->dc_init) {
@@ -511,6 +564,8 @@ static void in_prepare(void)
             s->dc += ((x << 12) - s->dc) >> 12;      /* ~1.9 Hz at 48 kHz */
             x -= s->dc >> 12;
         }
+        if (lpf)
+            x = (int32_t)lrintf(lp_run(s, (float)x));
         int32_t v = (x * g) >> 15;
         if (v > 32767) v = 32767;
         if (v < -32768) v = -32768;
@@ -601,6 +656,7 @@ int audio_setup(const usb_setup_t *s, uint8_t *buf, const uint8_t **in)
                     st->fs = fs;
                     st->pkt_acc = 0;
                     set_ratio(st);
+                    lp_design(st, st == &in_s ? cfg.lp_rx : cfg.lp_tx);
                     loop_reset(st);
                     st->reconf = true;
                     NVIC_SetPendingIRQ(DSP_IRQ);

@@ -12,7 +12,7 @@ void settings_defaults(void)
     cfg = (settings_t){
         .magic = SETTINGS_MAGIC, .version = SETTINGS_VERSION, .size = sizeof(settings_t),
         .vol_out = 0, .vol_in = 0, .mute_out = 0, .mute_in = 0,
-        .buf_ms = 2, .dc_block = 1,
+        .buf_ms = 1, .dc_block = 1,
         /* CHIRP raises DTR and RTS together, so it must not key the radio */
         .ptt_src = { PTT_SRC_DTR_NRTS, PTT_SRC_OFF },
         .ptt_vox = { 0, 0 },

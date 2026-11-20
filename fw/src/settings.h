@@ -1,6 +1,9 @@
 #pragma once
 #include "board.h"
 
+/* low-pass choices (cutoff), 2nd-order Butterworth */
+enum { LP_OFF, LP_3K, LP_4K, LP_8K, LP_16K, LP_COUNT };
+
 enum { PTT_SRC_OFF, PTT_SRC_DTR, PTT_SRC_RTS, PTT_SRC_DTR_NRTS, PTT_SRC_RTS_NDTR,
        PTT_SRC_COUNT };
 
@@ -21,8 +24,10 @@ typedef struct {
     uint16_t vox_hang;     /* ms */
     uint8_t  led_en;
     uint8_t  unused0;      /* was the sleep option (keeps the layout) */
-    uint8_t  oversample;   /* ADC/DAC at fs * OSR with FIR filters */
-    uint8_t  pad[3];
+    uint8_t  oversample;   /* ADC/DAC oversampling with resamplers */
+    uint8_t  lp_tx;        /* low-pass USB -> radio: LP_* */
+    uint8_t  lp_rx;        /* low-pass radio -> USB: LP_* */
+    uint8_t  pad[1];
     uint32_t crc;
 } settings_t;
 
