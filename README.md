@@ -25,7 +25,7 @@ If nothing responds, short the BOOT0 pads (J2) while plugging in to reach the RO
 
     picocom /dev/serial/by-id/usb-aioc-slop_aioc-slop_<serial>-if00
 
-Left/Right select, Up/Down (or +/-) change, PgUp/PgDn big steps, Enter open/run,
+Up/Down select, +/- change, PgUp/PgDn big steps, Enter open/run,
 Esc back, S save, Ctrl-L redraw, `:` command line (`show`, `get`, `set`, `save`,
 `defaults`, `status`, `dfu`, `reset`).
 

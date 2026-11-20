@@ -1,7 +1,7 @@
 /* Terminal menu on the config port (VT100/ANSI), plus a line-mode command
  * interface for scripting (':' in the menu).
  *
- * Keys: Left/Right select an entry, Up/Down (or +/-) change it directly,
+ * Keys: Up/Down select an entry, +/- change it directly,
  * PgUp/PgDn change in big steps, Enter opens a submenu or runs an action,
  * Esc goes back, S saves, Ctrl-L redraws.
  *
@@ -426,7 +426,7 @@ static void draw(void)
     else if (msg) { out_str(" "); out_str(msg); }
     out_eol();
     out_esc("\x1b[2m");
-    out_str(" Left/Right select  Up/Down change  PgUp/PgDn big steps  Enter open/run");
+    out_str(" Up/Down select  +/- change  PgUp/PgDn big steps  Enter open/run");
     out_eol();
     out_str(" Esc back  S save  Ctrl-L redraw  : command line");
     out_esc("\x1b[0m");
@@ -609,15 +609,15 @@ static void menu_key(int k)
     dirty = true;
 
     switch (k) {
-    case K_LEFT:
-    case K_RIGHT:
+    case K_UP:
+    case K_DOWN:
         for (uint8_t i = 0; i < page->n; i++) {
-            sel = (uint8_t)((sel + (k == K_RIGHT ? 1 : page->n - 1)) % page->n);
+            sel = (uint8_t)((sel + (k == K_DOWN ? 1 : page->n - 1)) % page->n);
             if (selectable(&page->items[sel])) break;
         }
         break;
-    case K_UP: case '+': if (it) change(it, +1, false); break;
-    case K_DOWN: case '-': if (it) change(it, -1, false); break;
+    case '+': if (it) change(it, +1, false); break;
+    case '-': if (it) change(it, -1, false); break;
     case K_PGUP: if (it) change(it, +1, true); break;
     case K_PGDN: if (it) change(it, -1, true); break;
     case '\r': case '\n':
