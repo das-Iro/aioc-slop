@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include "stm32f302xc.h"
 
-#define FW_VERSION  "0.1"
+#define FW_VERSION  "0.1-beta"
 #define USB_VID     0x1209   /* pid.codes */
 #define USB_PID     0x0001   /* pid.codes test PID: development only */
 
