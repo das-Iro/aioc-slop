@@ -2,7 +2,7 @@
 #include "settings.h"
 
 #define SETTINGS_MAGIC   0x434F4941u   /* "AIOC" */
-#define SETTINGS_VERSION 1
+#define SETTINGS_VERSION 2
 
 extern const uint8_t _settings_page[];
 settings_t cfg;
@@ -19,6 +19,7 @@ void settings_defaults(void)
         .tot_s = 0,
         .vox_thr = -30, .vox_hang = 500,
         .led_en = 1, .sleep_en = 1,
+        .oversample = 1,
     };
 }
 

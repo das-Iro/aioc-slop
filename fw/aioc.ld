@@ -17,7 +17,7 @@ SECTIONS
   .text : { *(.text*) *(.rodata*) . = ALIGN(4); } > FLASH
   .ARM.exidx : { *(.ARM.exidx*) } > FLASH
   _sidata = LOADADDR(.data);
-  .data : { _sdata = .; *(.data*) . = ALIGN(4); _edata = .; } > RAM AT > FLASH
+  .data : { _sdata = .; *(.ramfunc*) *(.data*) . = ALIGN(4); _edata = .; } > RAM AT > FLASH
   .bss (NOLOAD) : { _sbss = .; *(.bss*) *(COMMON) . = ALIGN(4); _ebss = .; } > RAM
   .noinit (NOLOAD) : { *(.noinit*) } > NOINIT
   end = _ebss;

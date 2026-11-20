@@ -22,9 +22,11 @@
  * the rest. The menu runs in PendSV at the lowest priority. */
 #define PRIO_IO     1
 #define PRIO_DELAY  2
+#define PRIO_DSP    3   /* audio filters, pended from the SOF */
 #define PRIO_MENU   15
 
 #define USB_IRQ     USB_LP_CAN_RX0_IRQn
+#define DSP_IRQ     EXTI0_IRQn      /* unused EXTI line, pended in software */
 
 /* Ask the USB ISR to run its deferred work (endpoint kicks). */
 static inline void usb_pend(void) { NVIC_SetPendingIRQ(USB_IRQ); }

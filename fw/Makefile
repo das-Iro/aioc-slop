@@ -13,7 +13,7 @@ ARCH    := -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 CFLAGS  := $(ARCH) -std=c11 -Os -g3 -Wall -Wextra -Wno-unused-parameter \
            -ffunction-sections -fdata-sections -fno-common \
            -DSTM32F302xC -Isrc -Icmsis/core -Icmsis/device
-LDFLAGS := $(ARCH) -nostartfiles -Taioc.ld -Wl,--gc-sections \
+LDFLAGS := $(ARCH) -nostartfiles -Taioc.ld -Wl,--gc-sections -Wl,--no-warn-rwx-segments \
            -Wl,-Map=$(BUILD)/$(TARGET).map --specs=nano.specs --specs=nosys.specs
 
 # USB IDs: runtime (this firmware) and the ST ROM bootloader in DFU mode
@@ -34,6 +34,9 @@ $(BUILD)/%.bin: $(BUILD)/%.elf
 
 $(BUILD)/%.hex: $(BUILD)/%.elf
 	$(OBJCOPY) -O ihex $< $@
+
+# the audio filters are hot loops
+$(BUILD)/audio.o: CFLAGS += -O2
 
 $(BUILD):
 	mkdir -p $@

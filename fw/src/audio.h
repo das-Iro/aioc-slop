@@ -17,7 +17,8 @@
 typedef struct {
     uint32_t fs;        /* sample rate */
     bool     active;    /* host is streaming (alt 1) */
-    int32_t  fill;      /* ring fill after the last packet, samples */
+    uint8_t  osr;       /* oversampling ratio in use (1 = off) */
+    int32_t  fill;      /* samples queued (rings + DMA), deviation from setpoint */
     float    ppm;       /* clock correction from the buffer fill loop */
     uint32_t xruns;     /* resyncs (under/overruns) */
     uint16_t peak;      /* peak level since the last read, 0..32767 */
@@ -37,3 +38,5 @@ void audio_in_done(void);               /* EP2 CTR_TX */
 /* For the menu. out = host->radio, in = radio->host */
 void  audio_stat(bool in, audio_stat_t *st);   /* clears peak */
 float audio_frame_ppm(void);            /* host clock vs. crystal */
+float audio_dsp_load(void);             /* filter CPU load, percent */
+void  audio_reconfigure(void);          /* after cfg.oversample changed */

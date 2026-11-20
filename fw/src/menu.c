@@ -180,8 +180,10 @@ static void act_reset(void) { out_str("\x1b[2J\x1b[H\x1b[?25hResetting...\r\n");
 
 static void info_rates(void)
 {
-    out_str("out "); out_uint(st_out.fs); out_str(st_out.active ? " (on)" : " (off)");
-    out_str(", in "); out_uint(st_in.fs); out_str(st_in.active ? " (on)" : " (off)");
+    out_str("out "); out_uint(st_out.fs); out_str(" x"); out_uint(st_out.osr);
+    out_str(st_out.active ? " (on)" : " (off)");
+    out_str(", in "); out_uint(st_in.fs); out_str(" x"); out_uint(st_in.osr);
+    out_str(st_in.active ? " (on)" : " (off)");
 }
 
 static void info_ptt(void)
@@ -235,8 +237,8 @@ static void info_rx_level(void) { out_meter(st_in.peak); }
 
 static void info_stream(const audio_stat_t *s)
 {
-    if (!s->active) { out_str("idle, "); out_uint(s->fs); out_str(" Hz"); return; }
-    out_uint(s->fs); out_str(" Hz, fill "); out_int(s->fill);
+    if (!s->active) { out_str("idle, "); out_uint(s->fs); out_str(" Hz x"); out_uint(s->osr); return; }
+    out_uint(s->fs); out_str(" Hz x"); out_uint(s->osr); out_str(", fill "); out_int(s->fill);
     out_str(", corr "); out_num((int32_t)(s->ppm * 10.0f), 10);
     out_str(" ppm, xruns "); out_uint(s->xruns);
 }
@@ -248,6 +250,12 @@ static void info_clock(void)
     out_str("host frame vs. crystal ");
     out_num((int32_t)(audio_frame_ppm() * 10.0f), 10);
     out_str(" ppm");
+}
+
+static void info_dsp(void)
+{
+    out_num((int32_t)(audio_dsp_load() * 10.0f), 10);
+    out_str(" % CPU");
 }
 
 static void info_usb(void)
@@ -275,9 +283,11 @@ static const item_t audio_items[] = {
     VOL("RX level (radio -> USB)", "rx_level", &cfg.vol_in),
     BOOL("RX mute", "rx_mute", &cfg.mute_in, audio_gain_update),
     BOOL("RX DC blocker", "dc_block", &cfg.dc_block, NULL),
+    BOOL("Oversampling", "oversample", &cfg.oversample, audio_reconfigure),
     { .label = "Buffer (latency)", .key = "buffer", .type = T_NUM, .vt = V_U8, .ptr = &cfg.buf_ms,
       .min = 1, .max = 8, .step = 1, .big = 2, .div = 1, .unit = "ms", .apply = audio_resync },
-    INFO("Sample rates (Hz)", info_rates),
+    INFO("Sample rates (Hz) x OSR", info_rates),
+    INFO("Filter CPU load", info_dsp),
 };
 
 static const item_t ptt_items[] = {
@@ -325,6 +335,7 @@ static const item_t status_items[] = {
     INFO("TX stream", info_out_stream),
     INFO("RX stream", info_in_stream),
     INFO("Clock", info_clock),
+    INFO("Filters (oversampling)", info_dsp),
     INFO("PTT", info_ptt),
     INFO("VOX", info_vox),
     INFO("Radio port", info_lines),

@@ -1,73 +1,109 @@
-/* USB audio class 1, synchronous endpoints.
+/* USB audio class 1, synchronous endpoints, with oversampling.
  *
- * host -> radio: iso OUT -> ring -> DMA2 Ch3 -> DAC1 CH1 (PA4), paced by TIM6
- * radio -> host: ADC2 IN12 (PB2), paced by TIM3 -> DMA2 Ch1 -> ring -> iso IN
+ * host -> radio: iso OUT -> out_fs ring -> interpolator (xOSR) -> dac_hw ring
+ *                -> DMA2 Ch3 -> DAC1 CH1 (PA4), paced by TIM6
+ * radio -> host: ADC2 IN12 (PB2), paced by TIM3 -> DMA2 Ch1 -> adc_hw ring
+ *                -> decimator (/OSR) -> in_fs ring -> iso IN
  *
- * Both sample clocks are locked to the host: the USB SOF interrupt
- * timestamps a free-running 72 MHz counter (TIM2) to measure the host's
- * frame period, which sets the timer periods (feed-forward). A slow PI loop
- * on each ring's fill level removes what is left. The fractional part of
- * the period is dithered once per frame. */
+ * The converters run at fs * OSR (88.2..96 kHz); polyphase Kaiser-windowed
+ * FIR filters (cutoff 0.45 fs; 16 taps per phase for RX, 8 for TX) do the
+ * rate conversion.
+ * The filters run in a low-priority interrupt (DSP_IRQ) pended from every
+ * USB SOF, so the SOF timestamp in the USB ISR is never delayed by them.
+ *
+ * Both sample clocks are locked to the host: the SOF interrupt timestamps a
+ * free-running 72 MHz counter (TIM2) to measure the host frame period, which
+ * sets the timer periods (feed-forward). A slow PI loop keeps the total
+ * number of queued samples (fs ring + filter + DMA ring) at its setpoint.
+ * The fractional timer period is dithered once per frame. */
 #include <math.h>
 #include "audio.h"
 #include "settings.h"
 #include "ptt.h"
 #include "clock.h"
 
-#define RING_N   512u            /* samples, power of two */
-#define RING_M   (RING_N - 1u)
+#define HW_N     1024u            /* converter-rate DMA rings, power of two */
+#define HW_M     (HW_N - 1u)
+#define FS_N     512u             /* fs-rate rings */
+#define FS_M     (FS_N - 1u)
+#define HW_RATE  96000u           /* converter rate target */
+#define TAPS_IN  16               /* decimator taps per polyphase branch */
+#define TAPS_OUT 8                /* interpolator taps per branch (the mic
+                                     line is RC filtered at ~7 kHz anyway) */
+#define OSR_MAX  12
+#define LEAD_US  1500u            /* DAC ring kept this far ahead of playback */
 
-static uint16_t dac_ring[RING_N];
-static uint16_t adc_ring[RING_N];
+static uint16_t dac_hw[HW_N];
+static uint16_t adc_hw[HW_N];
+static int16_t out_fs[FS_N];
+static int16_t in_fs[FS_N];
+/* interpolator: by phase, each phase reversed, gain OSR; decimator: plain
+ * (the prototype is symmetric). Both are used with ascending samples. */
+static int16_t h_out[TAPS_OUT * OSR_MAX] __attribute__((aligned(4)));
+static int16_t h_in[TAPS_IN * OSR_MAX] __attribute__((aligned(4)));
+static int32_t h_in_sum;               /* sum of the quantized decimator taps */
 
 static const uint32_t rates[] = { 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000 };
 
 typedef struct {
     TIM_TypeDef *tim;
     DMA_Channel_TypeDef *dma;
-    uint16_t *ring;
-    uint32_t fs;
+    volatile uint32_t fs;
     volatile bool active;
-    bool     sync;              /* next packet re-establishes the target fill */
-    uint32_t hw;                /* samples moved by the DMA (monotonic) */
-    uint32_t sw;                /* samples moved by USB (monotonic) */
-    uint16_t dma_pos;
-    uint32_t frac;              /* period dither accumulator, Q16 */
-    uint32_t pkt_acc;           /* fractional samples per frame (IN) */
-    float    err_f, integ, ppm; /* fill loop */
-    int32_t  fill;
+    volatile bool reconf;       /* DSP: redo filters and positions */
+    volatile uint8_t osr;
+    uint8_t  taps;              /* per phase; 1 = no filtering */
+    uint8_t  designed_osr;      /* filter table currently holds this OSR */
+    /* fs ring: OUT w = USB, r = DSP; IN w = DSP, r = USB */
+    volatile uint32_t w, r;
+    volatile uint16_t done;     /* hw ring: next index the DSP handles */
+    uint32_t ph;                /* interpolator phase (DSP) */
+    /* USB side */
+    volatile bool sync;
+    float    sp;                /* fill setpoint, captured at sync */
+    bool     sp_valid;
+    float    err_f, integ, ppm;
+    float    fill;
     uint32_t xruns;
-    uint16_t idle;              /* frames without an OUT packet */
+    uint16_t idle;
     uint16_t peak;
     int32_t  gain;              /* Q15, 0 = muted */
     int32_t  dc;                /* DC estimate, Q12 (IN only) */
+    uint32_t frac;              /* period dither accumulator, Q16 */
+    uint32_t pkt_acc;           /* fractional samples per frame (IN) */
 } stream_t;
 
-static stream_t out_s = { .tim = TIM6, .dma = DMA2_Channel3, .ring = dac_ring, .fs = 48000 };
-static stream_t in_s  = { .tim = TIM3, .dma = DMA2_Channel1, .ring = adc_ring, .fs = 48000 };
+static stream_t out_s = { .tim = TIM6, .dma = DMA2_Channel3, .fs = 48000, .osr = 1, .taps = 1 };
+static stream_t in_s  = { .tim = TIM3, .dma = DMA2_Channel1, .fs = 48000, .osr = 1, .taps = 1 };
 
 static float frame_clk = 72000.0f;   /* timer clocks per USB frame */
 static uint32_t ts_ref;
 static uint16_t fn_ref;
 static bool ts_valid;
+static uint32_t dsp_cyc, dsp_frames;
+static float dsp_load;
 
 /* ---- helpers ------------------------------------------------------------ */
+static uint8_t osr_for(uint32_t fs)
+{
+    if (!cfg.oversample) return 1;
+    uint32_t o = HW_RATE / fs;
+    return (uint8_t)MIN(o, (uint32_t)OSR_MAX);
+}
+
+static uint16_t dma_pos(const stream_t *s)
+{
+    return (uint16_t)(HW_N - s->dma->CNDTR) & HW_M;
+}
+
 static uint32_t target_fill(const stream_t *s)
 {
     return (uint32_t)cfg.buf_ms * s->fs / 1000u;
 }
 
-/* Follow the DMA position; must run at least once per ring period (>10 ms) */
-static void dma_track(stream_t *s)
-{
-    uint16_t pos = (uint16_t)(RING_N - s->dma->CNDTR) & RING_M;
-    s->hw += (uint16_t)(pos - s->dma_pos) & RING_M;
-    s->dma_pos = pos;
-}
-
 static void set_period(stream_t *s)
 {
-    float per = frame_clk * 1000.0f / (float)s->fs / (1.0f + s->ppm * 1e-6f);
+    float per = frame_clk * 1000.0f / ((float)s->fs * s->osr) / (1.0f + s->ppm * 1e-6f);
     uint32_t q = (uint32_t)(per * 65536.0f);
     s->frac += q & 0xFFFF;
     uint32_t arr = (q >> 16) + (s->frac >> 16);
@@ -75,11 +111,11 @@ static void set_period(stream_t *s)
     s->tim->ARR = arr - 1;
 }
 
-/* Fill loop. err > 0: too many samples buffered. dir = +1 if a faster
+/* Fill loop. err > 0: too many samples queued. dir = +1 if a faster
  * sample clock shrinks the fill (DAC), -1 if it grows it (ADC). */
-static void fill_loop(stream_t *s, int32_t err, float dir)
+static void fill_loop(stream_t *s, float err, float dir)
 {
-    s->err_f += ((float)err - s->err_f) * (1.0f / 32.0f);
+    s->err_f += (err - s->err_f) * (1.0f / 32.0f);
     s->integ += s->err_f * 0.01f;                    /* ppm per ms per sample */
     if (s->integ > 300.0f) s->integ = 300.0f;
     if (s->integ < -300.0f) s->integ = -300.0f;
@@ -92,13 +128,8 @@ static void fill_loop(stream_t *s, int32_t err, float dir)
 static void loop_reset(stream_t *s)
 {
     s->err_f = s->integ = s->ppm = 0.0f;
+    s->sp_valid = false;
     s->sync = true;
-}
-
-static void dac_clear(void)
-{
-    for (uint32_t i = 0; i < RING_N; i++)
-        dac_ring[i] = 2048;
 }
 
 static int32_t db_to_q15(int16_t v256)
@@ -112,15 +143,193 @@ void audio_gain_update(void)
     in_s.gain  = cfg.mute_in  ? 0 : db_to_q15(cfg.vol_in);
 }
 
-static void set_rate(stream_t *s, uint32_t fs)
+/* ---- filter design ------------------------------------------------------ */
+static float bessel_i0(float x)
 {
-    s->fs = fs;
-    s->frac = 0;
-    s->pkt_acc = 0;
+    float s = 1.0f, t = 1.0f;
+    for (int k = 1; k < 30; k++) {
+        float q = x / (2.0f * (float)k);
+        t *= q * q;
+        s += t;
+        if (t < 1e-7f * s) break;
+    }
+    return s;
+}
+
+/* Kaiser-windowed sinc, N = osr * taps, cutoff 0.45 fs. The decimator
+ * table is in natural order with unity DC gain (Q15); the interpolator
+ * table is ordered by phase, h_out[ph * taps + k] = h[ph + k * osr], with
+ * gain osr so every phase has unity DC gain. */
+static int32_t design(int16_t *h, uint8_t osr, uint8_t taps, bool interp)
+{
+    int32_t qsum = 0;
+    const int n = osr * taps;
+    const float fc = 0.45f / osr, beta = 5.0f;
+    const float m = (float)(n - 1) / 2.0f, i0b = bessel_i0(beta);
+    float sum = 0.0f;
+    for (int pass = 0; pass < 2; pass++) {
+        float scale = 32768.0f * (interp ? osr : 1) / sum;
+        for (int i = 0; i < n; i++) {
+            float t = (float)i - m;
+            float sinc = fabsf(t) < 1e-6f ? 2.0f * fc
+                       : sinf(2.0f * 3.14159265f * fc * t) / (3.14159265f * t);
+            float r = t / m;
+            float v = sinc * bessel_i0(beta * sqrtf(fmaxf(0.0f, 1.0f - r * r))) / i0b;
+            if (pass == 0) { sum += v; continue; }
+            int32_t q = (int32_t)lrintf(v * scale);
+            q = MAX(-32768, MIN(32767, q));
+            if (interp) h[(i % osr) * taps + (taps - 1 - i / osr)] = (int16_t)q;
+            else h[i] = (int16_t)q;
+            qsum += q;
+        }
+    }
+    return qsum;
+}
+
+/* ---- DSP (DSP_IRQ, below the USB ISR) ------------------------------------ */
+
+/* sum h[i] * x[i], n a multiple of 4; dual 16-bit MACs, unrolled.
+ * h is word aligned, x may be unaligned. */
+static inline int32_t dot16(const int16_t *h, const void *xv, uint32_t n)
+{
+    const uint32_t *hp = (const uint32_t *)(const void *)h;
+    const uint8_t *x = xv;
+    uint32_t acc = 0;
+    for (uint32_t i = 0; i < n / 2; i += 2) {
+        uint32_t x0, x1;
+        __builtin_memcpy(&x0, x + 4 * i, 4);
+        __builtin_memcpy(&x1, x + 4 * i + 4, 4);
+        acc = __SMLAD(hp[i], x0, acc);
+        acc = __SMLAD(hp[i + 1], x1, acc);
+    }
+    return (int32_t)acc;
+}
+
+static void reconfigure(stream_t *s, bool out)
+{
+    uint8_t osr = osr_for(s->fs);
+    uint8_t taps = osr > 1 ? (out ? TAPS_OUT : TAPS_IN) : 1;
+    if (osr > 1 && s->designed_osr != osr) {
+        int32_t q = design(out ? h_out : h_in, osr, taps, out);
+        if (!out) h_in_sum = q;
+        s->designed_osr = osr;
+    }
+    uint16_t pos = dma_pos(s);
+    __disable_irq();
+    if (out)
+        for (uint32_t i = 0; i < HW_N; i++)
+            dac_hw[i] = 2048;
+    s->osr = osr;
+    s->taps = taps;
+    s->ph = 0;
+    s->done = pos;
+    s->reconf = false;
     loop_reset(s);
-    set_period(s);
-    if (s == &out_s)
-        dac_clear();
+    __enable_irq();
+}
+
+static void dsp_adc(void)
+{
+    stream_t *s = &in_s;
+    uint16_t pos = dma_pos(s);
+    uint16_t d = s->done;
+    uint32_t avail = (uint16_t)(pos - d) & HW_M;
+    uint32_t osr = s->osr, n = osr * s->taps;
+    uint32_t w = s->w;
+    if (avail > HW_N / 2) {                  /* fell behind (long stall) */
+        d = pos;
+        avail = 0;
+    }
+    for (; avail >= osr; avail -= osr) {
+        d = (d + osr) & HW_M;
+        uint32_t j = (d - 1u) & HW_M;         /* newest sample of the group */
+        int32_t y;
+        if (osr == 1) {
+            y = ((int32_t)adc_hw[j] - 2048) << 4;
+        } else {
+            int32_t acc;
+            uint32_t j0 = (j + 1u - n) & HW_M;  /* oldest sample in the window */
+            if (j0 + n <= HW_N) {             /* window doesn't wrap */
+                acc = dot16(h_in, &adc_hw[j0], n);
+            } else {
+                acc = 0;
+                for (uint32_t i = 0; i < n; i++)
+                    acc += h_in[i] * (int32_t)adc_hw[(j0 + i) & HW_M];
+            }
+            /* remove the 2048 offset exactly, 12 bit -> 16 bit scale */
+            y = (acc - 2048 * h_in_sum) * 16 / h_in_sum;
+        }
+        in_fs[w++ & FS_M] = (int16_t)MAX(-32768, MIN(32767, y));
+    }
+    __disable_irq();
+    s->w = w;
+    s->done = d;
+    __enable_irq();
+}
+
+static void dsp_dac(void)
+{
+    stream_t *s = &out_s;
+    uint16_t pos = dma_pos(s);
+    uint16_t d = s->done;
+    uint32_t queued = (uint16_t)(d - pos) & HW_M;
+    const uint32_t osr = s->osr, taps = s->taps;
+    const uint32_t lead = s->fs * osr / 1000u * LEAD_US / 1000u;
+    uint32_t r = s->r, ph = s->ph;
+    uint32_t w = s->w;
+    if (queued > HW_N / 2) {                 /* DMA overtook us */
+        d = pos;
+        queued = 0;
+    }
+    while (queued < lead) {
+        if (ph == 0) {
+            if ((int32_t)(w - r) <= 0) {
+                w = s->w;                     /* re-read, USB may have added */
+                if ((int32_t)(w - r) <= 0)
+                    out_fs[r & FS_M] = 0;     /* no data: play silence */
+            }
+            r++;
+        }
+        /* all remaining phases of the newest input sample */
+        uint32_t c0 = (r - taps) & FS_M;      /* oldest input in the window */
+        bool flat = c0 + taps <= FS_N;
+        for (; ph < osr && queued < lead; ph++, queued++) {
+            int32_t y;
+            if (osr == 1) {
+                y = out_fs[(r - 1u) & FS_M];
+            } else {
+                const int16_t *h = &h_out[ph * taps];
+                int32_t acc;
+                if (flat) {
+                    acc = dot16(h, &out_fs[c0], taps);
+                } else {
+                    acc = 0;
+                    for (uint32_t k = 0; k < taps; k++)
+                        acc += h[k] * (int32_t)out_fs[(c0 + k) & FS_M];
+                }
+                y = acc >> 15;
+            }
+            int32_t v = (y >> 4) + 2048;
+            dac_hw[d] = (uint16_t)(v < 0 ? 0 : v > 4095 ? 4095 : v);
+            d = (d + 1) & HW_M;
+        }
+        if (ph == osr) ph = 0;
+    }
+    s->ph = ph;
+    __disable_irq();
+    s->r = r;
+    s->done = d;
+    __enable_irq();
+}
+
+void EXTI0_IRQHandler(void)   /* DSP_IRQ */
+{
+    uint32_t t0 = DWT->CYCCNT;
+    if (out_s.reconf) reconfigure(&out_s, true);
+    if (in_s.reconf) reconfigure(&in_s, false);
+    dsp_adc();
+    dsp_dac();
+    dsp_cyc += DWT->CYCCNT - t0;
 }
 
 /* ---- init --------------------------------------------------------------- */
@@ -129,6 +338,10 @@ void audio_init(void)
     RCC->AHBENR  |= RCC_AHBENR_DMA2EN | RCC_AHBENR_ADC12EN;
     RCC->APB1ENR |= RCC_APB1ENR_TIM2EN | RCC_APB1ENR_TIM3EN | RCC_APB1ENR_TIM6EN |
                     RCC_APB1ENR_DAC1EN;
+
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;  /* cycle counter: DSP load */
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 
     /* TIM2: free-running 72 MHz timestamp counter for SOF */
     TIM2->PSC = 0;
@@ -146,10 +359,11 @@ void audio_init(void)
     }
 
     /* DAC1 CH1, triggered by TIM6 TRGO (TSEL=000), DMA2 Ch3 */
-    dac_clear();
+    for (uint32_t i = 0; i < HW_N; i++)
+        dac_hw[i] = 2048;
     DMA2_Channel3->CPAR = (uint32_t)&DAC1->DHR12R1;
-    DMA2_Channel3->CMAR = (uint32_t)dac_ring;
-    DMA2_Channel3->CNDTR = RING_N;
+    DMA2_Channel3->CMAR = (uint32_t)dac_hw;
+    DMA2_Channel3->CNDTR = HW_N;
     DMA2_Channel3->CCR = DMA_CCR_MSIZE_0 | DMA_CCR_PSIZE_1 | DMA_CCR_MINC |
                          DMA_CCR_CIRC | DMA_CCR_DIR | DMA_CCR_PL_1 | DMA_CCR_EN;
     DAC1->DHR12R1 = 2048;
@@ -169,30 +383,37 @@ void audio_init(void)
     delay_us(10);
     if (!(ADC2->ISR & ADC_ISR_ADRDY))
         fatal();
-    ADC2->SMPR2 = 5u << ADC_SMPR2_SMP12_Pos;         /* 61.5 cycles */
+    ADC2->SMPR2 = 5u << ADC_SMPR2_SMP12_Pos;         /* 61.5 cycles: 2 us/conv */
     ADC2->SQR1 = 12u << ADC_SQR1_SQ1_Pos;            /* L = 0: one conversion */
-    ADC2->CFGR = ADC_CFGR_EXTEN_0 | ADC_CFGR_EXTSEL_2 | ADC_CFGR_DMAEN | ADC_CFGR_DMACFG;
+    ADC2->CFGR = ADC_CFGR_EXTEN_0 | ADC_CFGR_EXTSEL_2 | ADC_CFGR_DMAEN |
+                 ADC_CFGR_DMACFG | ADC_CFGR_OVRMOD;
     DMA2_Channel1->CPAR = (uint32_t)&ADC2->DR;
-    DMA2_Channel1->CMAR = (uint32_t)adc_ring;
-    DMA2_Channel1->CNDTR = RING_N;
+    DMA2_Channel1->CMAR = (uint32_t)adc_hw;
+    DMA2_Channel1->CNDTR = HW_N;
     DMA2_Channel1->CCR = DMA_CCR_MSIZE_0 | DMA_CCR_PSIZE_0 | DMA_CCR_MINC |
                          DMA_CCR_CIRC | DMA_CCR_PL_1 | DMA_CCR_EN;
     ADC2->CR |= ADC_CR_ADSTART;
 
     audio_gain_update();
-    set_rate(&out_s, 48000);
-    set_rate(&in_s, 48000);
+    out_s.reconf = in_s.reconf = true;
+    out_s.osr = osr_for(out_s.fs);
+    in_s.osr = osr_for(in_s.fs);
+    set_period(&out_s);
+    set_period(&in_s);
     TIM6->EGR = TIM_EGR_UG;
     TIM3->EGR = TIM_EGR_UG;
     TIM6->CR1 |= TIM_CR1_CEN;
     TIM3->CR1 |= TIM_CR1_CEN;
+
+    NVIC_SetPriority(DSP_IRQ, PRIO_DSP);
+    NVIC_EnableIRQ(DSP_IRQ);
+    NVIC_SetPendingIRQ(DSP_IRQ);
 }
 
 /* ---- USB events --------------------------------------------------------- */
 void audio_reset(void)
 {
     out_s.active = in_s.active = false;
-    dac_clear();
     loop_reset(&out_s);
     loop_reset(&in_s);
 }
@@ -201,14 +422,19 @@ void audio_suspend(void)
 {
     audio_reset();
     ts_valid = false;
+    /* no more SOFs, so the DSP stops: silence the DAC ring */
+    for (uint32_t i = 0; i < HW_N; i++)
+        dac_hw[i] = 2048;
 }
 
-static volatile bool resync_req;
-
-void audio_resync(void)   /* any context: handled in the next SOF */
+void audio_resync(void)   /* any context */
 {
-    resync_req = true;
+    ts_valid = false;
+    out_s.reconf = in_s.reconf = true;
+    NVIC_SetPendingIRQ(DSP_IRQ);
 }
+
+void audio_reconfigure(void) { audio_resync(); }
 
 static void in_prepare(void);
 
@@ -218,7 +444,6 @@ void audio_set_alt(uint8_t itf, uint8_t alt)
     s->active = alt;
     loop_reset(s);
     if (s == &out_s) {
-        dac_clear();
         s->idle = 0;
         usb_iso_enable(EP_AUDIO_OUT, alt);
     } else {
@@ -232,6 +457,23 @@ void audio_set_alt(uint8_t itf, uint8_t alt)
     ptt_update();
 }
 
+/* Samples queued between USB and the converter, in fs samples */
+static float out_queued(void)
+{
+    stream_t *s = &out_s;
+    uint32_t q = (uint16_t)(s->done - dma_pos(s)) & HW_M;
+    if (q > HW_N / 2) q = 0;
+    return (float)(int32_t)(s->w - s->r) + (float)q / s->osr;
+}
+
+static float in_queued(void)
+{
+    stream_t *s = &in_s;
+    uint32_t q = (uint16_t)(dma_pos(s) - s->done) & HW_M;
+    if (q > HW_N / 2) q = 0;
+    return (float)(int32_t)(s->w - s->r) + (float)q / s->osr;
+}
+
 void audio_out_packet(void)
 {
     stream_t *s = &out_s;
@@ -239,62 +481,69 @@ void audio_out_packet(void)
     if (!s->active)
         return;
     s->idle = 0;
-    dma_track(s);
+    uint32_t w = s->w;
     if (s->sync) {
-        s->sw = s->hw + target_fill(s);
+        uint32_t r = s->r, t = target_fill(s);
+        for (uint32_t i = 0; i < t; i++)
+            out_fs[(r + i) & FS_M] = 0;
+        w = r + t;
         s->sync = false;
+        s->sp_valid = false;
     }
     volatile uint16_t *p = usb_ep_pma(EP_AUDIO_OUT);
     int32_t g = s->gain;
     uint32_t peak = 0;
-    uint32_t w = s->sw;
     for (uint16_t i = 0; i < bytes / 2; i++) {
         int32_t v = ((int32_t)(int16_t)p[2 * i] * g) >> 15;
         if (v > 32767) v = 32767;
         uint32_t a = (uint32_t)(v < 0 ? -v : v);
         if (a > peak) peak = a;
-        dac_ring[w++ & RING_M] = (uint16_t)((v >> 4) + 2048);
+        out_fs[w++ & FS_M] = (int16_t)v;
     }
-    s->sw = w;
+    s->w = w;
     if (peak > s->peak) s->peak = (uint16_t)MIN(peak, 32767u);
     vox_feed(peak);
 
-    int32_t fill = (int32_t)(s->sw - s->hw);
-    s->fill = fill;
-    if (fill < 0 || fill > (int32_t)(RING_N - 2 * AUDIO_PKT / 2)) {
+    int32_t ring = (int32_t)(w - s->r);
+    if (ring < 0 || ring > (int32_t)(FS_N - 2 * AUDIO_PKT / 2)) {
         s->xruns++;
-        dac_clear();
         s->sync = true;
         return;
     }
-    /* measured right after writing: the setpoint includes this packet */
-    fill_loop(s, fill - (int32_t)(target_fill(s) + bytes / 2), 1.0f);
+    float f = out_queued();
+    if (!s->sp_valid) {                  /* first packet after a sync */
+        s->sp = f;
+        s->sp_valid = true;
+    }
+    s->fill = f - s->sp;
+    fill_loop(s, s->fill, 1.0f);
 }
 
 static void in_prepare(void)
 {
     stream_t *s = &in_s;
-    dma_track(s);
     uint32_t n = s->fs / 1000u;
     s->pkt_acc += s->fs % 1000u;
     if (s->pkt_acc >= 1000u) {
         s->pkt_acc -= 1000u;
         n++;
     }
-    int32_t fill = (int32_t)(s->hw - s->sw);
-    if (s->sync || fill < (int32_t)n || fill > (int32_t)(RING_N - 64)) {
+    uint32_t w = s->w;
+    int32_t ring = (int32_t)(w - s->r);
+    if (s->sync || ring < (int32_t)n || ring > (int32_t)(FS_N - 64)) {
         if (!s->sync)
             s->xruns++;
         s->sync = false;
-        s->sw = s->hw - target_fill(s) - n;
+        s->sp_valid = false;
+        s->r = w - target_fill(s) - n;
     }
     volatile uint16_t *p = usb_ep_pma(EP_AUDIO_IN);
     int32_t g = s->gain;
     uint32_t peak = 0;
-    uint32_t r = s->sw;
+    uint32_t r = s->r;
     bool dcb = cfg.dc_block;
     for (uint32_t i = 0; i < n; i++) {
-        int32_t x = ((int32_t)adc_ring[r++ & RING_M] - 2048) << 4;
+        int32_t x = in_fs[r++ & FS_M];
         if (dcb) {
             s->dc += ((x << 12) - s->dc) >> 12;      /* ~1.9 Hz at 48 kHz */
             x -= s->dc >> 12;
@@ -306,13 +555,17 @@ static void in_prepare(void)
         if (a > peak) peak = a;
         p[2 * i] = (uint16_t)v;
     }
-    s->sw = r;
+    s->r = r;
     usb_iso_tx_count(EP_AUDIO_IN, (uint16_t)(n * 2));
     if (peak > s->peak) s->peak = (uint16_t)MIN(peak, 32767u);
 
-    fill = (int32_t)(s->hw - s->sw);
-    s->fill = fill;
-    fill_loop(s, fill - (int32_t)target_fill(s), -1.0f);
+    float f = in_queued();
+    if (!s->sp_valid) {
+        s->sp = f;
+        s->sp_valid = true;
+    }
+    s->fill = f - s->sp;
+    fill_loop(s, s->fill, -1.0f);
 }
 
 void audio_in_done(void)
@@ -339,28 +592,22 @@ void audio_sof(uint32_t t, uint16_t fn)
         }
     }
 
-    if (resync_req) {
-        /* After a long stall (flash write) the DMA may have wrapped */
-        resync_req = false;
-        ts_valid = false;
-        out_s.dma_pos = (uint16_t)(RING_N - out_s.dma->CNDTR) & RING_M;
-        in_s.dma_pos = (uint16_t)(RING_N - in_s.dma->CNDTR) & RING_M;
-        dac_clear();
-        loop_reset(&out_s);
-        loop_reset(&in_s);
-    }
-    dma_track(&out_s);
-    dma_track(&in_s);
-
-    /* OUT stream stopped without SET_INTERFACE: play silence */
+    /* OUT stream stopped without SET_INTERFACE: the DSP plays silence */
     if (out_s.active && ++out_s.idle == 3) {
-        dac_clear();
         out_s.sync = true;
         vox_feed(0);
     }
 
     set_period(&out_s);
     set_period(&in_s);
+    NVIC_SetPendingIRQ(DSP_IRQ);
+
+    if (++dsp_frames >= 1000) {                      /* load over ~1 s */
+        uint32_t c = dsp_cyc;
+        dsp_cyc = 0;
+        dsp_load = (float)c * (100.0f / ((float)SYSCLK_HZ * dsp_frames / 1000.0f));
+        dsp_frames = 0;
+    }
 }
 
 /* ---- class requests ----------------------------------------------------- */
@@ -388,7 +635,13 @@ int audio_setup(const usb_setup_t *s, uint8_t *buf, const uint8_t **in)
             uint32_t fs = buf[0] | (uint32_t)buf[1] << 8 | (uint32_t)buf[2] << 16;
             for (size_t i = 0; i < ARRAY_LEN(rates); i++)
                 if (rates[i] == fs) {
-                    set_rate(st, fs);
+                    st->fs = fs;
+                    st->frac = 0;
+                    st->pkt_acc = 0;
+                    st->osr = osr_for(fs);   /* timer period right away */
+                    loop_reset(st);
+                    st->reconf = true;
+                    NVIC_SetPendingIRQ(DSP_IRQ);
                     return 0;
                 }
             return -1;
@@ -448,7 +701,8 @@ void audio_stat(bool in, audio_stat_t *st)
     __disable_irq();
     st->fs = s->fs;
     st->active = s->active;
-    st->fill = s->fill;
+    st->osr = s->osr;
+    st->fill = (int32_t)lrintf(s->fill);
     st->ppm = s->ppm;
     st->xruns = s->xruns;
     st->peak = s->peak;
@@ -456,7 +710,5 @@ void audio_stat(bool in, audio_stat_t *st)
     __enable_irq();
 }
 
-float audio_frame_ppm(void)
-{
-    return (frame_clk / 72000.0f - 1.0f) * 1e6f;
-}
+float audio_frame_ppm(void) { return (frame_clk / 72000.0f - 1.0f) * 1e6f; }
+float audio_dsp_load(void) { return dsp_load; }

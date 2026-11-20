@@ -21,7 +21,8 @@ typedef struct {
     uint16_t vox_hang;     /* ms */
     uint8_t  led_en;
     uint8_t  sleep_en;     /* WFI in idle; off = busy idle (noise test) */
-    uint8_t  pad[4];
+    uint8_t  oversample;   /* ADC/DAC at fs * OSR with FIR filters */
+    uint8_t  pad[3];
     uint32_t crc;
 } settings_t;
 
