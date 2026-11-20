@@ -47,14 +47,23 @@ bool settings_load(void)
     return false;
 }
 
-/* Instruction fetches stall while the flash is busy, so by the time the
- * next instruction runs the operation is over: check the result once. */
-static bool flash_done(void)
+/* Wait for the end of a flash operation: EOP/error interrupt + WFI. */
+static volatile uint32_t flash_sr;
+static volatile bool flash_irq;
+
+void FLASH_IRQHandler(void)
 {
-    __DSB();
-    uint32_t sr = FLASH->SR;
+    flash_sr = FLASH->SR;
     FLASH->SR = FLASH_SR_EOP | FLASH_SR_PGERR | FLASH_SR_WRPERR;
-    return !(sr & (FLASH_SR_BSY | FLASH_SR_PGERR | FLASH_SR_WRPERR));
+    flash_irq = true;
+}
+
+static bool flash_start_wait(uint32_t cr)
+{
+    flash_irq = false;
+    FLASH->CR = cr | FLASH_CR_EOPIE | FLASH_CR_ERRIE;
+    WAIT_UNTIL(flash_irq);
+    return (flash_sr & FLASH_SR_EOP) && !(flash_sr & (FLASH_SR_PGERR | FLASH_SR_WRPERR));
 }
 
 bool settings_save(void)
@@ -68,22 +77,25 @@ bool settings_save(void)
     FLASH->KEYR = FLASH_KEY1;
     FLASH->KEYR = FLASH_KEY2;
 
+    FLASH->SR = FLASH_SR_EOP | FLASH_SR_PGERR | FLASH_SR_WRPERR;
+    NVIC_SetPriority(FLASH_IRQn, PRIO_DELAY);
+    NVIC_EnableIRQ(FLASH_IRQn);
+
     FLASH->CR = FLASH_CR_PER;
     FLASH->AR = (uint32_t)_settings_page;
-    FLASH->CR = FLASH_CR_PER | FLASH_CR_STRT;
-    ok = flash_done();
-    FLASH->CR = 0;
+    ok = flash_start_wait(FLASH_CR_PER | FLASH_CR_STRT);
 
-    if (ok) {
-        FLASH->CR = FLASH_CR_PG;
-        const uint16_t *src = (const uint16_t *)&cfg;
-        volatile uint16_t *dst = (volatile uint16_t *)_settings_page;
-        for (size_t i = 0; i < sizeof(settings_t) / 2 && ok; i++) {
-            dst[i] = src[i];
-            ok = flash_done();
-        }
-        FLASH->CR = 0;
+    const uint16_t *src = (const uint16_t *)&cfg;
+    volatile uint16_t *dst = (volatile uint16_t *)_settings_page;
+    for (size_t i = 0; i < sizeof(settings_t) / 2 && ok; i++) {
+        flash_irq = false;
+        FLASH->CR = FLASH_CR_PG | FLASH_CR_EOPIE | FLASH_CR_ERRIE;
+        dst[i] = src[i];                 /* starts the programming */
+        WAIT_UNTIL(flash_irq);
+        ok = (flash_sr & FLASH_SR_EOP) && !(flash_sr & (FLASH_SR_PGERR | FLASH_SR_WRPERR));
     }
+    FLASH->CR = 0;
+    NVIC_DisableIRQ(FLASH_IRQn);
     FLASH->CR = FLASH_CR_LOCK;
     return ok && settings_load();
 }

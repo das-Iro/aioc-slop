@@ -1,0 +1,37 @@
+# AIOC-alt
+
+Alternative firmware for the AIOC (All-In-One-Cable, rev 1.0, STM32F302CBT6),
+written in plain C on CMSIS headers (no HAL, no USB library).
+
+USB functions (VID:PID 1209:0001, pid.codes test PID):
+
+| Interface | What |
+|---|---|
+| if00 (CDC-ACM) | Configuration: terminal menu, `:` for a command line |
+| if02 (CDC-ACM) | UART bridge to the radio (PA9/PA10), line coding from the host; DTR/RTS drive PTT |
+| USB audio (UAC1) | Mono 16 bit, 8/11.025/16/22.05/24/32/44.1/48 kHz both ways, synchronous, clocked from USB SOF |
+| DFU runtime | `dfu-util` detaches into the STM32 ROM bootloader |
+
+## Build and flash
+
+    cd fw
+    make            # arm-none-eabi-gcc
+    make flash      # dfu-util; works from AIOC-alt or the ROM bootloader
+
+First flash over the stock firmware: `dfu-util -d 1209:7388,0483:df11 -a 0 -s 0x08000000:leave -D build/aioc.bin`.
+If nothing responds, short the BOOT0 pads (J2) while plugging in to reach the ROM bootloader.
+
+## Menu
+
+    picocom /dev/serial/by-id/usb-AIOC-alt_AIOC-alt_<serial>-if00
+
+Left/Right select, Up/Down (or +/-) change, PgUp/PgDn big steps, Enter open/run,
+Esc back, S save, Ctrl-L redraw, `:` command line (`show`, `get`, `set`, `save`,
+`defaults`, `status`, `dfu`, `reset`).
+
+Pages: Audio (levels, mute, DC blocker, buffer/latency), PTT (source per output:
+DTR / RTS / DTR&!RTS / RTS&!DTR, VOX, time-out, manual), VOX (threshold, hang),
+Serial, System (LED, sleep on/off, DFU, reset), Live status.
+
+Default PTT1 = DTR and not RTS, so CHIRP (DTR+RTS) doesn't key the radio.
+`sleep off` replaces WFI with a busy idle loop to test supply-ripple noise.

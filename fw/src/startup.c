@@ -18,6 +18,7 @@ void UsageFault_Handler(void) WEAK;   void SVC_Handler(void) WEAK;
 void DebugMon_Handler(void) WEAK;     void PendSV_Handler(void) WEAK;
 void SysTick_Handler(void) WEAK;
 void RCC_IRQHandler(void) WEAK;
+void FLASH_IRQHandler(void) WEAK;
 void DMA1_Channel4_IRQHandler(void) WEAK;
 void DMA1_Channel5_IRQHandler(void) WEAK;
 void USB_HP_CAN_TX_IRQHandler(void) WEAK;
@@ -41,6 +42,7 @@ const vec_t vectors[16 + NIRQ] = {
     [14] = PendSV_Handler,
     [15] = SysTick_Handler,
     [16 ... 16 + NIRQ - 1] = Default_Handler,
+    [16 + 4]  = FLASH_IRQHandler,
     [16 + 5]  = RCC_IRQHandler,
     [16 + 14] = DMA1_Channel4_IRQHandler,
     [16 + 15] = DMA1_Channel5_IRQHandler,
