@@ -1,0 +1,8 @@
+# aioc-slop: name the CDC-ACM ports after their function
+#   /dev/aioc-slop-config   (if00, terminal menu)
+#   /dev/aioc-slop-radio    (if02, UART bridge to the radio, DTR/RTS = PTT)
+# plus per-device links with the serial number under /dev/serial/by-function/
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="1209", ENV{ID_MODEL_ID}=="0001", ENV{ID_USB_INTERFACE_NUM}=="00", \
+  SYMLINK+="aioc-slop-config", SYMLINK+="serial/by-function/aioc-slop-config-$env{ID_SERIAL_SHORT}"
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="1209", ENV{ID_MODEL_ID}=="0001", ENV{ID_USB_INTERFACE_NUM}=="02", \
+  SYMLINK+="aioc-slop-radio", SYMLINK+="serial/by-function/aioc-slop-radio-$env{ID_SERIAL_SHORT}"

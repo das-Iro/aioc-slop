@@ -99,10 +99,10 @@ int usb_string_desc(uint8_t idx, uint8_t *buf, uint16_t max)
     case STR_MANUF:   s = "aioc-slop"; break;
     case STR_PRODUCT: s = "aioc-slop"; break;
     case STR_SERIAL:  s = usb_serial(); break;
-    case STR_CFG:     s = "AIOC config"; break;
-    case STR_RADIO:   s = "AIOC radio"; break;
-    case STR_AUDIO:   s = "AIOC audio"; break;
-    case STR_DFU:     s = "AIOC DFU"; break;
+    case STR_CFG:     s = "aioc-slop config"; break;
+    case STR_RADIO:   s = "aioc-slop radio"; break;
+    case STR_AUDIO:   s = "aioc-slop audio"; break;
+    case STR_DFU:     s = "aioc-slop DFU"; break;
     default: return -1;
     }
     int n = 2;
