@@ -78,7 +78,7 @@ typedef struct {
     uint32_t xruns;
     uint16_t idle;
     uint16_t peak;
-    int32_t  gain;              /* Q12 (4096 = 0 dB, up to +12 dB), 0 = muted */
+    int32_t  gain;              /* Q12 (4096 = 0 dB), 0 = muted */
     biquad_t lp[LP_SECTIONS];   /* low-pass: cascaded biquads */
     float    lp_sum;            /* RX: sum over the last decimation step */
     uint32_t lp_n;
@@ -211,6 +211,8 @@ static inline float lp_run(stream_t *s, float x)
 
 void audio_gain_update(void)
 {
+    if (cfg.vol_out > VOL_MAX) cfg.vol_out = VOL_MAX;
+    if (cfg.vol_in  > VOL_MAX) cfg.vol_in  = VOL_MAX;
     out_s.gain = cfg.mute_out ? 0 : db_to_q12(cfg.vol_out);
     in_s.gain  = cfg.mute_in  ? 0 : db_to_q12(cfg.vol_in);
 }

@@ -11,7 +11,7 @@
 #define UAC_OT_USB_IN   6
 
 #define VOL_MIN   (-60 * 256)   /* 1/256 dB */
-#define VOL_MAX   (12 * 256)    /* +12 dB */
+#define VOL_MAX   0             /* 0 dB */
 #define VOL_RES   128           /* 0.5 dB */
 
 typedef struct {
