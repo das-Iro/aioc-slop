@@ -2,7 +2,7 @@
  *
  * host -> radio: iso OUT -> out_fs ring -> interpolator (xOSR) -> dac_hw ring
  *                -> DMA2 Ch3 -> DAC1 CH1 (PA4), paced by TIM6
- * radio -> host: ADC2 IN12 (PB2), paced by TIM3 -> DMA2 Ch1 -> adc_hw ring
+ * radio -> host: ADC2 IN12 (PB2), free-running at 2.4 MS/s -> DMA2 Ch1 -> adc_hw ring
  *                -> decimator (/OSR) -> in_fs ring -> iso IN
  *
  * The converters run at fs * OSR (~192 kHz). Rate conversion is a simple
@@ -23,16 +23,20 @@
 #include "ptt.h"
 #include "clock.h"
 
-#define HW_N     1024u            /* converter-rate DMA rings, power of two */
+#define HW_N     1024u            /* DAC DMA ring, power of two */
 #define HW_M     (HW_N - 1u)
+#define ADC_N    4096u            /* ADC DMA ring (1.7 ms at 2.4 MS/s) */
+#define ADC_M    (ADC_N - 1u)
+#define ADC_CLKS 30u              /* HCLK cycles per conversion: 36 MHz ADC
+                                     clock, 2.5 + 12.5 cycles -> 2.4 MS/s */
 #define FS_N     512u             /* fs-rate rings */
 #define FS_M     (FS_N - 1u)
-#define HW_RATE  192000u          /* converter rate target */
+#define HW_RATE  192000u          /* DAC rate target */
 #define OSR_MAX  24
 #define LEAD_US  1500u            /* DAC ring kept this far ahead of playback */
 
 static uint16_t dac_hw[HW_N];
-static uint16_t adc_hw[HW_N];
+static uint16_t adc_hw[ADC_N];
 static int16_t out_fs[FS_N];
 static int16_t in_fs[FS_N];
 static const uint32_t rates[] = { 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000 };
@@ -43,7 +47,10 @@ typedef struct {
     volatile uint32_t fs;
     volatile bool active;
     volatile bool reconf;       /* DSP: redo filters and positions */
-    volatile uint8_t osr;
+    volatile uint8_t osr;       /* DAC: integer oversampling ratio */
+    uint16_t ring_n;            /* DMA ring length */
+    volatile float ratio;       /* ADC: input samples per output */
+    float    need, acc;         /* ADC decimator state (DSP) */
     /* fs ring: OUT w = USB, r = DSP; IN w = DSP, r = USB */
     volatile uint32_t w, r;
     volatile uint16_t done;     /* hw ring: next index the DSP handles */
@@ -59,12 +66,13 @@ typedef struct {
     uint16_t peak;
     int32_t  gain;              /* Q15, 0 = muted */
     int32_t  dc;                /* DC estimate, Q12 (IN only) */
+    bool     dc_init;           /* seed the DC estimate with the next sample */
     uint32_t frac;              /* period dither accumulator, Q16 */
     uint32_t pkt_acc;           /* fractional samples per frame (IN) */
 } stream_t;
 
-static stream_t out_s = { .tim = TIM6, .dma = DMA2_Channel3, .fs = 48000, .osr = 1 };
-static stream_t in_s  = { .tim = TIM3, .dma = DMA2_Channel1, .fs = 48000, .osr = 1 };
+static stream_t out_s = { .tim = TIM6, .dma = DMA2_Channel3, .fs = 48000, .osr = 1, .ring_n = HW_N };
+static stream_t in_s  = { .dma = DMA2_Channel1, .fs = 48000, .osr = 1, .ring_n = ADC_N, .ratio = 50.0f };
 
 static float frame_clk = 72000.0f;   /* timer clocks per USB frame */
 static uint32_t ts_ref;
@@ -83,7 +91,7 @@ static uint8_t osr_for(uint32_t fs)
 
 static uint16_t dma_pos(const stream_t *s)
 {
-    return (uint16_t)(HW_N - s->dma->CNDTR) & HW_M;
+    return (uint16_t)(s->ring_n - s->dma->CNDTR) & (s->ring_n - 1u);
 }
 
 static uint32_t target_fill(const stream_t *s)
@@ -93,6 +101,13 @@ static uint32_t target_fill(const stream_t *s)
 
 static void set_period(stream_t *s)
 {
+    if (s == &in_s) {
+        /* The ADC free-runs on the crystal; follow the host clock with the
+         * decimation ratio: ADC samples per host frame / outputs per frame */
+        s->ratio = frame_clk / (float)ADC_CLKS * 1000.0f / (float)s->fs /
+                   (1.0f + s->ppm * 1e-6f);
+        return;
+    }
     float per = frame_clk * 1000.0f / ((float)s->fs * s->osr) / (1.0f + s->ppm * 1e-6f);
     uint32_t q = (uint32_t)(per * 65536.0f);
     s->frac += q & 0xFFFF;
@@ -137,13 +152,15 @@ void audio_gain_update(void)
 
 static void reconfigure(stream_t *s, bool out)
 {
-    uint8_t osr = osr_for(s->fs);
+    uint8_t osr = out ? osr_for(s->fs) : 1;
     uint16_t pos = dma_pos(s);
     __disable_irq();
     if (out)
         for (uint32_t i = 0; i < HW_N; i++)
             dac_hw[i] = 2048;
     s->osr = osr;
+    s->need = s->ratio;
+    s->acc = 0.0f;
     s->ph = 0;
     s->done = pos;
     s->reconf = false;
@@ -151,30 +168,55 @@ static void reconfigure(stream_t *s, bool out)
     __enable_irq();
 }
 
+/* Rational moving-average decimator (after rhgndf's AIOC fork): every
+ * output is the average of `ratio` input samples; the sample on a boundary
+ * is split between the two outputs by its fractional weight. With
+ * oversampling off it point-samples instead (one input per output). */
 static void dsp_adc(void)
 {
     stream_t *s = &in_s;
     uint16_t pos = dma_pos(s);
     uint16_t d = s->done;
-    uint32_t avail = (uint16_t)(pos - d) & HW_M;
-    const uint32_t osr = s->osr;
+    uint32_t avail = (uint16_t)(pos - d) & ADC_M;
     uint32_t w = s->w;
-    if (avail > HW_N / 2) {                  /* fell behind (long stall) */
+    if (avail > ADC_N / 2) {                 /* fell behind (long stall) */
         d = pos;
         avail = 0;
     }
-    for (; avail >= osr; avail -= osr) {
-        /* moving average over the OSR samples of this group */
-        int32_t sum = 0;
-        for (uint32_t i = 0; i < osr; i++) {
-            sum += adc_hw[d];
-            d = (d + 1) & HW_M;
+    const float R = s->ratio;
+    const float scale = 16.0f / R;           /* average, 12 bit -> 16 bit */
+    const bool avg = cfg.oversample;
+    float need = s->need, acc = s->acc;
+    while (avail) {
+        if (need >= 1.0f) {
+            /* whole samples of the current output, up to the ring end */
+            uint32_t k = MIN((uint32_t)need, avail);
+            k = MIN(k, ADC_N - d);
+            if (avg) {
+                const uint16_t *p = &adc_hw[d];
+                uint32_t sum = 0;
+#pragma GCC unroll 4
+                for (uint32_t i = 0; i < k; i++)
+                    sum += p[i];
+                acc += (float)sum;
+            }
+            need -= (float)k;
+            d = (d + k) & ADC_M;
+            avail -= k;
+        } else {
+            /* boundary sample: finish this output, start the next */
+            float x = (float)adc_hw[d];
+            d = (d + 1) & ADC_M;
+            avail--;
+            float y = avg ? (acc + x * need) * scale : x * 16.0f;
+            int32_t v = (int32_t)lrintf(y - 32768.0f);
+            in_fs[w++ & FS_M] = (int16_t)MAX(-32768, MIN(32767, v));
+            acc = x * (1.0f - need);
+            need += R - 1.0f;
         }
-        /* remove the 2048 offset, 12 bit -> 16 bit; the averaging adds
-         * fractional bits below the 12-bit LSB */
-        int32_t y = (sum - 2048 * (int32_t)osr) * 16 / (int32_t)osr;
-        in_fs[w++ & FS_M] = (int16_t)MAX(-32768, MIN(32767, y));
     }
+    s->need = need;
+    s->acc = acc;
     __disable_irq();
     s->w = w;
     s->done = d;
@@ -220,6 +262,12 @@ static void dsp_dac(void)
     __enable_irq();
 }
 
+void DMA2_Channel1_IRQHandler(void)   /* ADC ring half/full */
+{
+    DMA2->IFCR = DMA_IFCR_CGIF1;
+    NVIC_SetPendingIRQ(DSP_IRQ);
+}
+
 void EXTI0_IRQHandler(void)   /* DSP_IRQ */
 {
     uint32_t t0 = DWT->CYCCNT;
@@ -234,7 +282,7 @@ void EXTI0_IRQHandler(void)   /* DSP_IRQ */
 void audio_init(void)
 {
     RCC->AHBENR  |= RCC_AHBENR_DMA2EN | RCC_AHBENR_ADC12EN;
-    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN | RCC_APB1ENR_TIM3EN | RCC_APB1ENR_TIM6EN |
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN | RCC_APB1ENR_TIM6EN |
                     RCC_APB1ENR_DAC1EN;
 
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;  /* cycle counter: DSP load */
@@ -247,14 +295,11 @@ void audio_init(void)
     TIM2->EGR = TIM_EGR_UG;
     TIM2->CR1 = TIM_CR1_CEN;
 
-    /* Sample timers: update event -> TRGO */
-    for (int i = 0; i < 2; i++) {
-        TIM_TypeDef *t = i ? TIM3 : TIM6;
-        t->PSC = 0;
-        t->ARR = 1499;
-        t->CR2 = TIM_CR2_MMS_1;
-        t->CR1 = TIM_CR1_ARPE;
-    }
+    /* DAC sample timer: update event -> TRGO */
+    TIM6->PSC = 0;
+    TIM6->ARR = 374;
+    TIM6->CR2 = TIM_CR2_MMS_1;
+    TIM6->CR1 = TIM_CR1_ARPE;
 
     /* DAC1 CH1, triggered by TIM6 TRGO (TSEL=000), DMA2 Ch3 */
     for (uint32_t i = 0; i < HW_N; i++)
@@ -267,7 +312,7 @@ void audio_init(void)
     DAC1->DHR12R1 = 2048;
     DAC1->CR = DAC_CR_EN1 | DAC_CR_TEN1 | DAC_CR_DMAEN1;
 
-    /* ADC2 IN12, triggered by TIM3 TRGO (EXTSEL=0100), DMA2 Ch1 circular */
+    /* ADC2 IN12, continuous conversion (2.4 MS/s), DMA2 Ch1 circular */
     ADC12_COMMON->CCR = ADC_CCR_CKMODE_1;            /* HCLK/2 = 36 MHz */
     ADC2->CR = 0;                                    /* ADVREGEN 10 -> 00 */
     ADC2->CR = ADC_CR_ADVREGEN_0;                    /* -> 01: regulator on */
@@ -281,30 +326,30 @@ void audio_init(void)
     delay_us(10);
     if (!(ADC2->ISR & ADC_ISR_ADRDY))
         fatal();
-    ADC2->SMPR2 = 5u << ADC_SMPR2_SMP12_Pos;         /* 61.5 cycles: 2 us/conv */
+    ADC2->SMPR2 = 1u << ADC_SMPR2_SMP12_Pos;         /* 2.5 cycles (C11 holds the pin) */
     ADC2->SQR1 = 12u << ADC_SQR1_SQ1_Pos;            /* L = 0: one conversion */
-    ADC2->CFGR = ADC_CFGR_EXTEN_0 | ADC_CFGR_EXTSEL_2 | ADC_CFGR_DMAEN |
-                 ADC_CFGR_DMACFG | ADC_CFGR_OVRMOD;
+    ADC2->CFGR = ADC_CFGR_CONT | ADC_CFGR_DMAEN | ADC_CFGR_DMACFG | ADC_CFGR_OVRMOD;
     DMA2_Channel1->CPAR = (uint32_t)&ADC2->DR;
     DMA2_Channel1->CMAR = (uint32_t)adc_hw;
-    DMA2_Channel1->CNDTR = HW_N;
+    DMA2_Channel1->CNDTR = ADC_N;
+    /* half/full interrupts make sure the DSP keeps up between SOFs */
     DMA2_Channel1->CCR = DMA_CCR_MSIZE_0 | DMA_CCR_PSIZE_0 | DMA_CCR_MINC |
-                         DMA_CCR_CIRC | DMA_CCR_PL_1 | DMA_CCR_EN;
+                         DMA_CCR_CIRC | DMA_CCR_PL_1 | DMA_CCR_HTIE | DMA_CCR_TCIE |
+                         DMA_CCR_EN;
     ADC2->CR |= ADC_CR_ADSTART;
 
     audio_gain_update();
     out_s.reconf = in_s.reconf = true;
     out_s.osr = osr_for(out_s.fs);
-    in_s.osr = osr_for(in_s.fs);
     set_period(&out_s);
     set_period(&in_s);
     TIM6->EGR = TIM_EGR_UG;
-    TIM3->EGR = TIM_EGR_UG;
     TIM6->CR1 |= TIM_CR1_CEN;
-    TIM3->CR1 |= TIM_CR1_CEN;
 
     NVIC_SetPriority(DSP_IRQ, PRIO_DSP);
     NVIC_EnableIRQ(DSP_IRQ);
+    NVIC_SetPriority(DMA2_Channel1_IRQn, PRIO_DSP);
+    NVIC_EnableIRQ(DMA2_Channel1_IRQn);
     NVIC_SetPendingIRQ(DSP_IRQ);
 }
 
@@ -345,7 +390,7 @@ void audio_set_alt(uint8_t itf, uint8_t alt)
         s->idle = 0;
         usb_iso_enable(EP_AUDIO_OUT, alt);
     } else {
-        s->dc = 0;
+        s->dc_init = true;
         usb_iso_enable(EP_AUDIO_IN, false);
         if (alt) {
             in_prepare();                /* first packet ready before enabling */
@@ -367,9 +412,9 @@ static float out_queued(void)
 static float in_queued(void)
 {
     stream_t *s = &in_s;
-    uint32_t q = (uint16_t)(dma_pos(s) - s->done) & HW_M;
-    if (q > HW_N / 2) q = 0;
-    return (float)(int32_t)(s->w - s->r) + (float)q / s->osr;
+    uint32_t q = (uint16_t)(dma_pos(s) - s->done) & ADC_M;
+    if (q > ADC_N / 2) q = 0;
+    return (float)(int32_t)(s->w - s->r) + (float)q / s->ratio;
 }
 
 void audio_out_packet(void)
@@ -442,6 +487,10 @@ static void in_prepare(void)
     bool dcb = cfg.dc_block;
     for (uint32_t i = 0; i < n; i++) {
         int32_t x = in_fs[r++ & FS_M];
+        if (s->dc_init) {
+            s->dc = x << 12;                          /* no settling time */
+            s->dc_init = false;
+        }
         if (dcb) {
             s->dc += ((x << 12) - s->dc) >> 12;      /* ~1.9 Hz at 48 kHz */
             x -= s->dc >> 12;
@@ -599,7 +648,7 @@ void audio_stat(bool in, audio_stat_t *st)
     __disable_irq();
     st->fs = s->fs;
     st->active = s->active;
-    st->osr = s->osr;
+    st->osr = in ? (cfg.oversample ? s->ratio : 1.0f) : (float)s->osr;
     st->fill = (int32_t)lrintf(s->fill);
     st->ppm = s->ppm;
     st->xruns = s->xruns;

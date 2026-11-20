@@ -9,7 +9,7 @@ USB functions (VID:PID 1209:0001, pid.codes test PID):
 |---|---|
 | if00 (CDC-ACM) | Configuration: terminal menu, `:` for a command line |
 | if02 (CDC-ACM) | UART bridge to the radio (PA9/PA10), line coding from the host; DTR/RTS drive PTT |
-| USB audio (UAC1) | Mono 16 bit, 8/11.025/16/22.05/24/32/44.1/48 kHz both ways, synchronous, clocked from USB SOF; converters oversampled to ~192 kHz with moving-average decimation / sample-and-hold interpolation (switchable) |
+| USB audio (UAC1) | Mono 16 bit, 8/11.025/16/22.05/24/32/44.1/48 kHz both ways, synchronous, clocked from USB SOF; ADC free-running at 2.4 MS/s with a rational moving-average decimator (ratio follows the host clock), DAC at ~192 kHz with sample-and-hold (switchable) |
 | DFU runtime | `dfu-util` detaches into the STM32 ROM bootloader |
 
 ## Build and flash
@@ -36,6 +36,7 @@ Serial, System (LED, sleep on/off, DFU, reset), Live status.
 
 Default PTT1 = DTR and not RTS, so CHIRP (DTR+RTS) doesn't key the radio.
 `sleep off` replaces WFI with a busy idle loop to test supply-ripple noise.
-The oversampling work runs in a burst every USB frame (~21 % CPU at 48 kHz).
-With sleep on, the CPU current steps show up as 1 kHz lines on the RX path
-(around -80 dBFS); with sleep off they drop to about -95..-103 dBFS.
+The decimator idea comes from rhgndf's AIOC fork (audio_dsp.c). RX noise
+floor with nothing connected: -84 dBFS at 48 kHz and -87 dBFS at 8 kHz with
+oversampling on and sleep off (-71/-72 dBFS with point sampling). With sleep
+on, CPU current steps add 1 kHz lines and cost 5..8 dB.

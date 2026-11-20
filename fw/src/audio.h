@@ -17,7 +17,7 @@
 typedef struct {
     uint32_t fs;        /* sample rate */
     bool     active;    /* host is streaming (alt 1) */
-    uint8_t  osr;       /* oversampling ratio in use (1 = off) */
+    float    osr;       /* oversampling ratio (ADC: rational, DAC: integer) */
     int32_t  fill;      /* samples queued (rings + DMA), deviation from setpoint */
     float    ppm;       /* clock correction from the buffer fill loop */
     uint32_t xruns;     /* resyncs (under/overruns) */

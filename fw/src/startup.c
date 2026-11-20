@@ -20,6 +20,7 @@ void SysTick_Handler(void) WEAK;
 void RCC_IRQHandler(void) WEAK;
 void FLASH_IRQHandler(void) WEAK;
 void EXTI0_IRQHandler(void) WEAK;
+void DMA2_Channel1_IRQHandler(void) WEAK;
 void DMA1_Channel4_IRQHandler(void) WEAK;
 void DMA1_Channel5_IRQHandler(void) WEAK;
 void USB_HP_CAN_TX_IRQHandler(void) WEAK;
@@ -51,6 +52,7 @@ const vec_t vectors[16 + NIRQ] = {
     [16 + 19] = USB_HP_CAN_TX_IRQHandler,
     [16 + 20] = USB_LP_CAN_RX0_IRQHandler,
     [16 + 37] = USART1_IRQHandler,
+    [16 + 56] = DMA2_Channel1_IRQHandler,
 };
 
 void Reset_Handler(void)

@@ -180,9 +180,9 @@ static void act_reset(void) { out_str("\x1b[2J\x1b[H\x1b[?25hResetting...\r\n");
 
 static void info_rates(void)
 {
-    out_str("out "); out_uint(st_out.fs); out_str(" x"); out_uint(st_out.osr);
+    out_str("out "); out_uint(st_out.fs); out_str(" x"); out_num((int32_t)(st_out.osr * 10.0f), 10);
     out_str(st_out.active ? " (on)" : " (off)");
-    out_str(", in "); out_uint(st_in.fs); out_str(" x"); out_uint(st_in.osr);
+    out_str(", in "); out_uint(st_in.fs); out_str(" x"); out_num((int32_t)(st_in.osr * 10.0f), 10);
     out_str(st_in.active ? " (on)" : " (off)");
 }
 
@@ -237,8 +237,8 @@ static void info_rx_level(void) { out_meter(st_in.peak); }
 
 static void info_stream(const audio_stat_t *s)
 {
-    if (!s->active) { out_str("idle, "); out_uint(s->fs); out_str(" Hz x"); out_uint(s->osr); return; }
-    out_uint(s->fs); out_str(" Hz x"); out_uint(s->osr); out_str(", fill "); out_int(s->fill);
+    if (!s->active) { out_str("idle, "); out_uint(s->fs); out_str(" Hz x"); out_num((int32_t)(s->osr * 10.0f), 10); return; }
+    out_uint(s->fs); out_str(" Hz x"); out_num((int32_t)(s->osr * 10.0f), 10); out_str(", fill "); out_int(s->fill);
     out_str(", corr "); out_num((int32_t)(s->ppm * 10.0f), 10);
     out_str(" ppm, xruns "); out_uint(s->xruns);
 }
