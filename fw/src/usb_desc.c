@@ -8,7 +8,7 @@
 #define B3(x) LO(x), HI(x), (uint8_t)(((x) >> 16) & 0xFF)
 
 enum { STR_LANG, STR_MANUF, STR_PRODUCT, STR_SERIAL, STR_CFG, STR_RADIO,
-       STR_AUDIO, STR_DFU, STR_FU_TX, STR_FU_RX };
+       STR_AUDIO, STR_DFU };
 
 const uint8_t usb_dev_desc[18] = {
     18, 1, W(0x0200),
@@ -58,13 +58,11 @@ uint8_t usb_cfg_desc[] = {
     10, 0x24, 0x01, W(0x0100), W(AC_LEN), 2, IF_AS_OUT, IF_AS_IN,
     /* host -> radio: USB streaming IT 1 -> FU 2 -> speaker OT 3 */
     12, 0x24, 0x02, UAC_IT_USB_OUT, W(0x0101), 0, 1, W(0), 0, 0,
-    /* iFeature names the ALSA controls ("TX Playback", "RX Capture");
-     * alsactl init leaves those alone instead of resetting "PCM" */
-    9, 0x24, 0x06, UAC_FU_OUT, UAC_IT_USB_OUT, 1, 0x03, 0x00, STR_FU_TX,
+    9, 0x24, 0x06, UAC_FU_OUT, UAC_IT_USB_OUT, 1, 0x03, 0x00, 0,
     9, 0x24, 0x03, UAC_OT_SPK, W(0x0301), 0, UAC_FU_OUT, 0,
     /* radio -> host: microphone IT 4 -> FU 5 -> USB streaming OT 6 */
     12, 0x24, 0x02, UAC_IT_MIC, W(0x0201), 0, 1, W(0), 0, 0,
-    9, 0x24, 0x06, UAC_FU_IN, UAC_IT_MIC, 1, 0x03, 0x00, STR_FU_RX,
+    9, 0x24, 0x06, UAC_FU_IN, UAC_IT_MIC, 1, 0x03, 0x00, 0,
     9, 0x24, 0x03, UAC_OT_USB_IN, W(0x0101), 0, UAC_FU_IN, 0,
 
     AS_IFACE(IF_AS_OUT, UAC_IT_USB_OUT, EP_AUDIO_OUT),
@@ -105,8 +103,6 @@ int usb_string_desc(uint8_t idx, uint8_t *buf, uint16_t max)
     case STR_RADIO:   s = "aioc-slop radio"; break;
     case STR_AUDIO:   s = "aioc-slop audio"; break;
     case STR_DFU:     s = "aioc-slop DFU"; break;
-    case STR_FU_TX:   s = "TX"; break;
-    case STR_FU_RX:   s = "RX"; break;
     default: return -1;
     }
     int n = 2;
