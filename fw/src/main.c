@@ -1,4 +1,4 @@
-/* AIOC-alt: alternative firmware for the AIOC (All-In-One-Cable) */
+/* aioc-slop: alternative firmware for the AIOC (All-In-One-Cable) */
 #include "board.h"
 #include "clock.h"
 #include "settings.h"

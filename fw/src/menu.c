@@ -400,7 +400,7 @@ static void draw(void)
     out_esc(clear_req ? "\x1b[2J\x1b[H\x1b[?25l" : "\x1b[H\x1b[?25l");
     clear_req = false;
     out_esc("\x1b[1m");
-    out_str(" AIOC-alt " FW_VERSION);
+    out_str(" aioc-slop " FW_VERSION);
     out_esc("\x1b[0m");
     out_str("   ");
     for (uint8_t i = 0; i < depth; i++) {

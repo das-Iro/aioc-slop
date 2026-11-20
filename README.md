@@ -1,4 +1,4 @@
-# AIOC-alt
+# aioc-slop
 
 Alternative firmware for the AIOC (All-In-One-Cable, rev 1.0, STM32F302CBT6),
 written in plain C on CMSIS headers (no HAL, no USB library).
@@ -16,14 +16,14 @@ USB functions (VID:PID 1209:0001, pid.codes test PID):
 
     cd fw
     make            # arm-none-eabi-gcc
-    make flash      # dfu-util; works from AIOC-alt or the ROM bootloader
+    make flash      # dfu-util; works from aioc-slop or the ROM bootloader
 
-First flash over the stock firmware: `dfu-util -d 1209:7388,0483:df11 -a 0 -s 0x08000000:leave -D build/aioc.bin`.
+First flash over the stock firmware: `dfu-util -d 1209:7388,0483:df11 -a 0 -s 0x08000000:leave -D build/aioc-slop.bin`.
 If nothing responds, short the BOOT0 pads (J2) while plugging in to reach the ROM bootloader.
 
 ## Menu
 
-    picocom /dev/serial/by-id/usb-AIOC-alt_AIOC-alt_<serial>-if00
+    picocom /dev/serial/by-id/usb-aioc-slop_aioc-slop_<serial>-if00
 
 Left/Right select, Up/Down (or +/-) change, PgUp/PgDn big steps, Enter open/run,
 Esc back, S save, Ctrl-L redraw, `:` command line (`show`, `get`, `set`, `save`,

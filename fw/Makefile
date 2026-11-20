@@ -1,5 +1,5 @@
-# AIOC-alt firmware: plain C, CMSIS headers only
-TARGET  := aioc
+# aioc-slop firmware: plain C, CMSIS headers only
+TARGET  := aioc-slop
 BUILD   := build
 SRCS    := $(wildcard src/*.c)
 OBJS    := $(SRCS:src/%.c=$(BUILD)/%.o)
@@ -39,7 +39,7 @@ $(BUILD):
 	mkdir -p $@
 
 # Flash over USB DFU. Works from the ROM bootloader (BOOT0 shorted) and from
-# a running AIOC-alt (dfu-util detaches it through the DFU runtime interface).
+# a running aioc-slop (dfu-util detaches it through the DFU runtime interface).
 flash: $(BUILD)/$(TARGET).bin
 	dfu-util -d $(RUN_ID),$(DFU_ID) -a 0 -s 0x08000000:leave -D $<
 

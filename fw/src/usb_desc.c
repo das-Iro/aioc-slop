@@ -96,8 +96,8 @@ int usb_string_desc(uint8_t idx, uint8_t *buf, uint16_t max)
     case STR_LANG:
         buf[0] = 4; buf[1] = 3; buf[2] = 0x09; buf[3] = 0x04;
         return 4;
-    case STR_MANUF:   s = "AIOC-alt"; break;
-    case STR_PRODUCT: s = "AIOC-alt"; break;
+    case STR_MANUF:   s = "aioc-slop"; break;
+    case STR_PRODUCT: s = "aioc-slop"; break;
     case STR_SERIAL:  s = usb_serial(); break;
     case STR_CFG:     s = "AIOC config"; break;
     case STR_RADIO:   s = "AIOC radio"; break;
