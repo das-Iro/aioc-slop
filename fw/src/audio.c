@@ -3,7 +3,7 @@
  * host -> radio: iso OUT -> out_fs ring -> rational interpolator + 1st-order
  *                sigma-delta -> dac_hw ring -> DMA2 Ch3 -> DAC1 CH1 (PA4),
  *                free-running at 480 kHz (TIM6)
- * radio -> host: ADC2 IN12 (PB2), free-running at 2.4 MS/s -> DMA2 Ch1 ->
+ * radio -> host: ADC2 IN12 (PB2), free-running at 1.125 MS/s -> DMA2 Ch1 ->
  *                adc_hw ring -> rational decimator -> in_fs ring -> iso IN
  *
  * Both converters run at fixed rates from the crystal. Rate conversion is a
@@ -29,10 +29,15 @@
 #define HW_N     2048u            /* DAC DMA ring (4.3 ms at 480 kHz) */
 #define HW_M     (HW_N - 1u)
 #define DAC_CLKS 150u             /* HCLK cycles per DAC sample: 480 kHz */
-#define ADC_N    4096u            /* ADC DMA ring (1.7 ms at 2.4 MS/s) */
+#define ADC_N    4096u            /* ADC DMA ring (3.6 ms at 1.125 MS/s) */
 #define ADC_M    (ADC_N - 1u)
-#define ADC_CLKS 30u              /* HCLK cycles per conversion: 36 MHz ADC
-                                     clock, 2.5 + 12.5 cycles -> 2.4 MS/s */
+/* ADC sample time code (SMPR) and the resulting conversion period in HCLK
+ * cycles: ADC clock = HCLK/2 = 36 MHz, conversion = sample time + 12.5 */
+#ifndef ADC_SMP
+#define ADC_SMP  4u               /* 19.5 cycles -> 1.125 MS/s; measured: same
+                                     noise floor as 2.4 MS/s, -9 % CPU */
+#endif
+#define ADC_CLKS ((uint32_t[]){ 28, 30, 34, 40, 64, 148, 388, 1228 }[ADC_SMP])
 #define FS_N     512u             /* fs-rate rings */
 #define FS_M     (FS_N - 1u)
 #define LEAD_US  1500u            /* DAC ring kept this far ahead of playback */
@@ -324,7 +329,7 @@ void audio_init(void)
     DAC1->DHR12L1 = 0x8000;
     DAC1->CR = DAC_CR_EN1 | DAC_CR_TEN1 | DAC_CR_DMAEN1;
 
-    /* ADC2 IN12, continuous conversion (2.4 MS/s), DMA2 Ch1 circular */
+    /* ADC2 IN12, continuous conversion (1.125 MS/s), DMA2 Ch1 circular */
     ADC12_COMMON->CCR = ADC_CCR_CKMODE_1;            /* HCLK/2 = 36 MHz */
     ADC2->CR = 0;                                    /* ADVREGEN 10 -> 00 */
     ADC2->CR = ADC_CR_ADVREGEN_0;                    /* -> 01: regulator on */
@@ -338,7 +343,7 @@ void audio_init(void)
     delay_us(10);
     if (!(ADC2->ISR & ADC_ISR_ADRDY))
         fatal();
-    ADC2->SMPR2 = 1u << ADC_SMPR2_SMP12_Pos;         /* 2.5 cycles (C11 holds the pin) */
+    ADC2->SMPR2 = ADC_SMP << ADC_SMPR2_SMP12_Pos;   /* C11 holds the pin */
     ADC2->SQR1 = 12u << ADC_SQR1_SQ1_Pos;            /* L = 0: one conversion */
     ADC2->CFGR = ADC_CFGR_CONT | ADC_CFGR_DMAEN | ADC_CFGR_DMACFG | ADC_CFGR_OVRMOD;
     DMA2_Channel1->CPAR = (uint32_t)&ADC2->DR;

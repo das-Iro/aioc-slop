@@ -9,7 +9,7 @@ USB functions (VID:PID 1209:0001, pid.codes test PID):
 |---|---|
 | if00 (CDC-ACM) | Configuration: terminal menu, `:` for a command line |
 | if02 (CDC-ACM) | UART bridge to the radio (PA9/PA10), line coding from the host; DTR/RTS drive PTT |
-| USB audio (UAC1) | Mono 16 bit, 8/11.025/16/22.05/24/32/44.1/48 kHz both ways, synchronous, clocked from USB SOF; ADC free-running at 2.4 MS/s with a rational moving-average decimator (ratio follows the host clock), DAC free-running at 480 kHz with a rational interpolator and first-order sigma-delta (16 -> 12 bit); both ratios follow the host clock (switchable) |
+| USB audio (UAC1) | Mono 16 bit, 8/11.025/16/22.05/24/32/44.1/48 kHz both ways, synchronous, clocked from USB SOF; ADC free-running at 1.125 MS/s with a rational moving-average decimator (ratio follows the host clock), DAC free-running at 480 kHz with a rational interpolator and first-order sigma-delta (16 -> 12 bit); both ratios follow the host clock (switchable) |
 | DFU runtime | `dfu-util` detaches into the STM32 ROM bootloader |
 
 ## Build and flash
@@ -37,7 +37,7 @@ Serial, System (LED, DFU, reset), Live status.
 Default PTT1 = DTR and not RTS, so CHIRP (DTR+RTS) doesn't key the radio.
 The resampler and sigma-delta ideas come from rhgndf's AIOC fork (branch
 adc_dma, release v1.3.0-oversampling). RX noise
-floor with nothing connected: -84 dBFS at 48 kHz and -87 dBFS at 8 kHz with
+floor with nothing connected: -82.5 dBFS at 48 kHz and -88.5 dBFS at 8 kHz with
 oversampling on (-71/-72 dBFS with point sampling). The core never sleeps
 (no WFI): sleeping made the supply current step with the interrupt work,
 which added 1 kHz lines and cost 5..8 dB.
