@@ -41,3 +41,11 @@ floor with nothing connected: -82.5 dBFS at 48 kHz and -88.5 dBFS at 8 kHz with
 oversampling on (-71/-72 dBFS with point sampling). The core never sleeps
 (no WFI): sleeping made the supply current step with the interrupt work,
 which added 1 kHz lines and cost 5..8 dB.
+
+## License
+
+GPL-3.0 (see `LICENSE`), except for the vendored headers in `fw/cmsis/`:
+ARM CMSIS-Core (`fw/cmsis/core/`, Apache-2.0) and the ST device headers
+(`fw/cmsis/device/`, BSD-3-Clause), each with their license file.
+The schematic `k1-aioc-schematic-rev1.0.pdf` is from the AIOC project
+(https://github.com/skuep/AIOC) and is under that project's license.
