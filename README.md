@@ -9,7 +9,7 @@ USB functions (VID:PID 1209:0001, pid.codes test PID):
 |---|---|
 | if00 (CDC-ACM) | Configuration: terminal menu, `:` for a command line |
 | if02 (CDC-ACM) | UART bridge to the radio (PA9/PA10), line coding from the host; DTR/RTS drive PTT |
-| USB audio (UAC1) | Mono 16 bit, 8/11.025/16/22.05/24/32/44.1/48 kHz both ways, synchronous, clocked from USB SOF; converters oversampled to ~96 kHz with FIR decimation/interpolation (switchable) |
+| USB audio (UAC1) | Mono 16 bit, 8/11.025/16/22.05/24/32/44.1/48 kHz both ways, synchronous, clocked from USB SOF; converters oversampled to ~192 kHz with moving-average decimation / sample-and-hold interpolation (switchable) |
 | DFU runtime | `dfu-util` detaches into the STM32 ROM bootloader |
 
 ## Build and flash
@@ -36,6 +36,6 @@ Serial, System (LED, sleep on/off, DFU, reset), Live status.
 
 Default PTT1 = DTR and not RTS, so CHIRP (DTR+RTS) doesn't key the radio.
 `sleep off` replaces WFI with a busy idle loop to test supply-ripple noise.
-With oversampling on, the filters run in a burst every USB frame (~40 % CPU
-at 48 kHz); with sleep on that shows up as a 1 kHz line around -76 dBFS on
-the RX path, with sleep off it drops by ~10 dB.
+The oversampling work runs in a burst every USB frame (~21 % CPU at 48 kHz).
+With sleep on, the CPU current steps show up as 1 kHz lines on the RX path
+(around -80 dBFS); with sleep off they drop to about -95..-103 dBFS.

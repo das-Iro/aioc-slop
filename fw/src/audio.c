@@ -5,9 +5,10 @@
  * radio -> host: ADC2 IN12 (PB2), paced by TIM3 -> DMA2 Ch1 -> adc_hw ring
  *                -> decimator (/OSR) -> in_fs ring -> iso IN
  *
- * The converters run at fs * OSR (88.2..96 kHz); polyphase Kaiser-windowed
- * FIR filters (cutoff 0.45 fs; 16 taps per phase for RX, 8 for TX) do the
- * rate conversion.
+ * The converters run at fs * OSR (~192 kHz). Rate conversion is a simple
+ * moving average: the ADC side averages each group of OSR samples into one,
+ * the DAC side repeats every sample OSR times (zero-stuffing followed by an
+ * OSR-long moving average, i.e. a sample-and-hold).
  * The filters run in a low-priority interrupt (DSP_IRQ) pended from every
  * USB SOF, so the SOF timestamp in the USB ISR is never delayed by them.
  *
@@ -26,23 +27,14 @@
 #define HW_M     (HW_N - 1u)
 #define FS_N     512u             /* fs-rate rings */
 #define FS_M     (FS_N - 1u)
-#define HW_RATE  96000u           /* converter rate target */
-#define TAPS_IN  16               /* decimator taps per polyphase branch */
-#define TAPS_OUT 8                /* interpolator taps per branch (the mic
-                                     line is RC filtered at ~7 kHz anyway) */
-#define OSR_MAX  12
+#define HW_RATE  192000u          /* converter rate target */
+#define OSR_MAX  24
 #define LEAD_US  1500u            /* DAC ring kept this far ahead of playback */
 
 static uint16_t dac_hw[HW_N];
 static uint16_t adc_hw[HW_N];
 static int16_t out_fs[FS_N];
 static int16_t in_fs[FS_N];
-/* interpolator: by phase, each phase reversed, gain OSR; decimator: plain
- * (the prototype is symmetric). Both are used with ascending samples. */
-static int16_t h_out[TAPS_OUT * OSR_MAX] __attribute__((aligned(4)));
-static int16_t h_in[TAPS_IN * OSR_MAX] __attribute__((aligned(4)));
-static int32_t h_in_sum;               /* sum of the quantized decimator taps */
-
 static const uint32_t rates[] = { 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000 };
 
 typedef struct {
@@ -52,8 +44,6 @@ typedef struct {
     volatile bool active;
     volatile bool reconf;       /* DSP: redo filters and positions */
     volatile uint8_t osr;
-    uint8_t  taps;              /* per phase; 1 = no filtering */
-    uint8_t  designed_osr;      /* filter table currently holds this OSR */
     /* fs ring: OUT w = USB, r = DSP; IN w = DSP, r = USB */
     volatile uint32_t w, r;
     volatile uint16_t done;     /* hw ring: next index the DSP handles */
@@ -73,8 +63,8 @@ typedef struct {
     uint32_t pkt_acc;           /* fractional samples per frame (IN) */
 } stream_t;
 
-static stream_t out_s = { .tim = TIM6, .dma = DMA2_Channel3, .fs = 48000, .osr = 1, .taps = 1 };
-static stream_t in_s  = { .tim = TIM3, .dma = DMA2_Channel1, .fs = 48000, .osr = 1, .taps = 1 };
+static stream_t out_s = { .tim = TIM6, .dma = DMA2_Channel3, .fs = 48000, .osr = 1 };
+static stream_t in_s  = { .tim = TIM3, .dma = DMA2_Channel1, .fs = 48000, .osr = 1 };
 
 static float frame_clk = 72000.0f;   /* timer clocks per USB frame */
 static uint32_t ts_ref;
@@ -143,84 +133,17 @@ void audio_gain_update(void)
     in_s.gain  = cfg.mute_in  ? 0 : db_to_q15(cfg.vol_in);
 }
 
-/* ---- filter design ------------------------------------------------------ */
-static float bessel_i0(float x)
-{
-    float s = 1.0f, t = 1.0f;
-    for (int k = 1; k < 30; k++) {
-        float q = x / (2.0f * (float)k);
-        t *= q * q;
-        s += t;
-        if (t < 1e-7f * s) break;
-    }
-    return s;
-}
-
-/* Kaiser-windowed sinc, N = osr * taps, cutoff 0.45 fs. The decimator
- * table is in natural order with unity DC gain (Q15); the interpolator
- * table is ordered by phase, h_out[ph * taps + k] = h[ph + k * osr], with
- * gain osr so every phase has unity DC gain. */
-static int32_t design(int16_t *h, uint8_t osr, uint8_t taps, bool interp)
-{
-    int32_t qsum = 0;
-    const int n = osr * taps;
-    const float fc = 0.45f / osr, beta = 5.0f;
-    const float m = (float)(n - 1) / 2.0f, i0b = bessel_i0(beta);
-    float sum = 0.0f;
-    for (int pass = 0; pass < 2; pass++) {
-        float scale = 32768.0f * (interp ? osr : 1) / sum;
-        for (int i = 0; i < n; i++) {
-            float t = (float)i - m;
-            float sinc = fabsf(t) < 1e-6f ? 2.0f * fc
-                       : sinf(2.0f * 3.14159265f * fc * t) / (3.14159265f * t);
-            float r = t / m;
-            float v = sinc * bessel_i0(beta * sqrtf(fmaxf(0.0f, 1.0f - r * r))) / i0b;
-            if (pass == 0) { sum += v; continue; }
-            int32_t q = (int32_t)lrintf(v * scale);
-            q = MAX(-32768, MIN(32767, q));
-            if (interp) h[(i % osr) * taps + (taps - 1 - i / osr)] = (int16_t)q;
-            else h[i] = (int16_t)q;
-            qsum += q;
-        }
-    }
-    return qsum;
-}
-
 /* ---- DSP (DSP_IRQ, below the USB ISR) ------------------------------------ */
-
-/* sum h[i] * x[i], n a multiple of 4; dual 16-bit MACs, unrolled.
- * h is word aligned, x may be unaligned. */
-static inline int32_t dot16(const int16_t *h, const void *xv, uint32_t n)
-{
-    const uint32_t *hp = (const uint32_t *)(const void *)h;
-    const uint8_t *x = xv;
-    uint32_t acc = 0;
-    for (uint32_t i = 0; i < n / 2; i += 2) {
-        uint32_t x0, x1;
-        __builtin_memcpy(&x0, x + 4 * i, 4);
-        __builtin_memcpy(&x1, x + 4 * i + 4, 4);
-        acc = __SMLAD(hp[i], x0, acc);
-        acc = __SMLAD(hp[i + 1], x1, acc);
-    }
-    return (int32_t)acc;
-}
 
 static void reconfigure(stream_t *s, bool out)
 {
     uint8_t osr = osr_for(s->fs);
-    uint8_t taps = osr > 1 ? (out ? TAPS_OUT : TAPS_IN) : 1;
-    if (osr > 1 && s->designed_osr != osr) {
-        int32_t q = design(out ? h_out : h_in, osr, taps, out);
-        if (!out) h_in_sum = q;
-        s->designed_osr = osr;
-    }
     uint16_t pos = dma_pos(s);
     __disable_irq();
     if (out)
         for (uint32_t i = 0; i < HW_N; i++)
             dac_hw[i] = 2048;
     s->osr = osr;
-    s->taps = taps;
     s->ph = 0;
     s->done = pos;
     s->reconf = false;
@@ -234,31 +157,22 @@ static void dsp_adc(void)
     uint16_t pos = dma_pos(s);
     uint16_t d = s->done;
     uint32_t avail = (uint16_t)(pos - d) & HW_M;
-    uint32_t osr = s->osr, n = osr * s->taps;
+    const uint32_t osr = s->osr;
     uint32_t w = s->w;
     if (avail > HW_N / 2) {                  /* fell behind (long stall) */
         d = pos;
         avail = 0;
     }
     for (; avail >= osr; avail -= osr) {
-        d = (d + osr) & HW_M;
-        uint32_t j = (d - 1u) & HW_M;         /* newest sample of the group */
-        int32_t y;
-        if (osr == 1) {
-            y = ((int32_t)adc_hw[j] - 2048) << 4;
-        } else {
-            int32_t acc;
-            uint32_t j0 = (j + 1u - n) & HW_M;  /* oldest sample in the window */
-            if (j0 + n <= HW_N) {             /* window doesn't wrap */
-                acc = dot16(h_in, &adc_hw[j0], n);
-            } else {
-                acc = 0;
-                for (uint32_t i = 0; i < n; i++)
-                    acc += h_in[i] * (int32_t)adc_hw[(j0 + i) & HW_M];
-            }
-            /* remove the 2048 offset exactly, 12 bit -> 16 bit scale */
-            y = (acc - 2048 * h_in_sum) * 16 / h_in_sum;
+        /* moving average over the OSR samples of this group */
+        int32_t sum = 0;
+        for (uint32_t i = 0; i < osr; i++) {
+            sum += adc_hw[d];
+            d = (d + 1) & HW_M;
         }
+        /* remove the 2048 offset, 12 bit -> 16 bit; the averaging adds
+         * fractional bits below the 12-bit LSB */
+        int32_t y = (sum - 2048 * (int32_t)osr) * 16 / (int32_t)osr;
         in_fs[w++ & FS_M] = (int16_t)MAX(-32768, MIN(32767, y));
     }
     __disable_irq();
@@ -273,7 +187,7 @@ static void dsp_dac(void)
     uint16_t pos = dma_pos(s);
     uint16_t d = s->done;
     uint32_t queued = (uint16_t)(d - pos) & HW_M;
-    const uint32_t osr = s->osr, taps = s->taps;
+    const uint32_t osr = s->osr;
     const uint32_t lead = s->fs * osr / 1000u * LEAD_US / 1000u;
     uint32_t r = s->r, ph = s->ph;
     uint32_t w = s->w;
@@ -290,27 +204,11 @@ static void dsp_dac(void)
             }
             r++;
         }
-        /* all remaining phases of the newest input sample */
-        uint32_t c0 = (r - taps) & FS_M;      /* oldest input in the window */
-        bool flat = c0 + taps <= FS_N;
+        /* zero-stuffing + OSR-long moving average = repeat the sample */
+        int32_t v = (out_fs[(r - 1u) & FS_M] >> 4) + 2048;
+        uint16_t dv = (uint16_t)(v < 0 ? 0 : v > 4095 ? 4095 : v);
         for (; ph < osr && queued < lead; ph++, queued++) {
-            int32_t y;
-            if (osr == 1) {
-                y = out_fs[(r - 1u) & FS_M];
-            } else {
-                const int16_t *h = &h_out[ph * taps];
-                int32_t acc;
-                if (flat) {
-                    acc = dot16(h, &out_fs[c0], taps);
-                } else {
-                    acc = 0;
-                    for (uint32_t k = 0; k < taps; k++)
-                        acc += h[k] * (int32_t)out_fs[(c0 + k) & FS_M];
-                }
-                y = acc >> 15;
-            }
-            int32_t v = (y >> 4) + 2048;
-            dac_hw[d] = (uint16_t)(v < 0 ? 0 : v > 4095 ? 4095 : v);
+            dac_hw[d] = dv;
             d = (d + 1) & HW_M;
         }
         if (ph == osr) ph = 0;
